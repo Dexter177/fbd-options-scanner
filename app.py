@@ -24,6 +24,14 @@ from screener    import run_screener
 from scanner_core import analyse_ticker, SETUP_TYPES, SETUP_LABELS, MAX_RISK
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_analyse(ticker, anchor, setup_type, max_risk,
+                    short_min_dte, short_max_dte, spread_dte_target):
+    """Cache options-chain results for 5 min to avoid Yahoo rate-limits."""
+    return analyse_ticker(ticker, anchor, setup_type, max_risk,
+                          short_min_dte, short_max_dte, spread_dte_target)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,7 +320,7 @@ with tab_analyse:
 
     if analyse_btn and a_ticker:
         with st.spinner(f"Fetching options chain for {a_ticker}…"):
-            result = analyse_ticker(
+            result = _cached_analyse(
                 ticker            = a_ticker,
                 anchor            = a_anchor if a_anchor > 0 else None,
                 setup_type        = a_setup,
@@ -323,7 +331,14 @@ with tab_analyse:
             )
 
         if result["status"] == "error":
-            st.error(f"❌ {result['error']}")
+            if result["error"] == "rate_limited":
+                st.warning(
+                    "⏳ Yahoo Finance is rate-limiting this server — "
+                    "wait **30 seconds** then click Analyse again. "
+                    "This usually happens right after a full screener scan."
+                )
+            else:
+                st.error(f"❌ {result['error']}")
 
         else:
             # ── price summary ─────────────────────────────────────────────
