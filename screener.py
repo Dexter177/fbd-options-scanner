@@ -41,8 +41,18 @@ def get_sp500_tickers() -> tuple:
     Returns (tickers_list, meta_df) where meta has columns:
       ticker, company, sector
     """
-    url   = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url, attrs={"id": "constituents"})[0]
+    import requests as _requests
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        )
+    }
+    resp = _requests.get(url, headers=headers, timeout=20)
+    resp.raise_for_status()
+    table = pd.read_html(resp.text, attrs={"id": "constituents"})[0]
     # yfinance requires BRK-B not BRK.B
     table["Symbol"] = table["Symbol"].str.replace(".", "-", regex=False)
     tickers = table["Symbol"].tolist()
@@ -77,7 +87,7 @@ def run_screener(
     min_rel_vol:  float = 1.5,
     min_price:    float = 10.0,
     flush_days:   int   = 3,
-    progress_cb          = None,   # optional callable(float 0→1)
+    progress_cb          = None,   # optional callable(float 0->1)
 ) -> pd.DataFrame:
     """
     Scan S&P 500 for FBD flush candidates.
@@ -112,7 +122,7 @@ def run_screener(
     if progress_cb:
         progress_cb(0.02)
 
-    # ── batch download 6 months of daily bars (one HTTP request) ──────────
+    # -- batch download 6 months of daily bars (one HTTP request) --
     raw = yf.download(
         tickers,
         period="6mo",
@@ -134,7 +144,7 @@ def run_screener(
             progress_cb(0.30 + 0.65 * (i / n))
 
         try:
-            # ── extract per-ticker slice ──────────────────────────────────
+            # -- extract per-ticker slice --
             if isinstance(raw.columns, pd.MultiIndex):
                 df = raw[ticker].dropna(how="all")
             else:
@@ -152,30 +162,30 @@ def run_screener(
 
             current = float(close.iloc[-1])
 
-            # ── price floor ───────────────────────────────────────────────
+            # -- price floor --
             if current < min_price:
                 continue
 
-            # ── % below 6-month high ──────────────────────────────────────
+            # -- % below 6-month high --
             high_6m  = float(close.max())
             drop_pct = (current - high_6m) / high_6m * 100   # always negative
             if drop_pct > -min_drop_pct:
                 continue
 
-            # ── RSI ───────────────────────────────────────────────────────
+            # -- RSI --
             rsi = float(_calc_rsi(close).iloc[-1])
             if np.isnan(rsi) or rsi > max_rsi:
                 continue
 
-            # ── relative volume ───────────────────────────────────────────
+            # -- relative volume --
             vol_today  = float(volume.iloc[-1])
             avg_vol_20 = float(volume.iloc[-21:-1].mean())
             rel_vol    = vol_today / avg_vol_20 if avg_vol_20 > 0 else 0.0
             if rel_vol < min_rel_vol:
                 continue
 
-            # ── new 26-week low within flush_days bars ────────────────────
-            # 26 weeks ≈ 130 trading days; close.iloc[:-flush_days] is the
+            # -- new 26-week low within flush_days bars --
+            # 26 weeks ~ 130 trading days; close.iloc[:-flush_days] is the
             # "history before the flush window"
             history_before = close.iloc[:-flush_days]
             if len(history_before) < 10:
@@ -208,13 +218,13 @@ def run_screener(
 
     df_out = pd.DataFrame(results)
 
-    # ── join company name and sector ──────────────────────────────────────
+    # -- join company name and sector --
     df_out = df_out.merge(meta, on="ticker", how="left")
 
-    # ── sort deepest flush first ──────────────────────────────────────────
+    # -- sort deepest flush first --
     df_out = df_out.sort_values("drop_pct").reset_index(drop=True)
 
-    # ── column order ──────────────────────────────────────────────────────
+    # -- column order --
     ordered = ["ticker", "company", "sector", "price", "drop_pct",
                "rsi", "rel_vol", "prior_low", "recent_low"]
     df_out = df_out[[c for c in ordered if c in df_out.columns]]
