@@ -9,11 +9,29 @@ Key function: analyse_ticker()
 """
 
 import math
+import time
 import warnings
 from datetime import date, datetime
 from typing import Optional
 
 warnings.filterwarnings("ignore")
+
+
+def _yf_retry(fn, retries: int = 2, wait: int = 8):
+    """
+    Call fn(), retrying once on Yahoo rate-limit (429) errors.
+    Waits `wait` seconds between attempts so the throttle window resets.
+    """
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate = "429" in msg or "too many" in msg or "rate limit" in msg
+            if is_rate and attempt < retries - 1:
+                time.sleep(wait)
+            else:
+                raise
 
 try:
     import yfinance as yf
@@ -220,10 +238,15 @@ def analyse_ticker(
 
         # ── options expiries ──────────────────────────────────────────────
         try:
-            exps = tk.options
+            exps = _yf_retry(lambda: tk.options)
         except Exception as e:
-            out["status"] = "error"
-            out["error"]  = f"Options unavailable: {e}"
+            msg = str(e).lower()
+            if "429" in msg or "too many" in msg or "rate" in msg:
+                out["status"] = "error"
+                out["error"]  = "rate_limited"
+            else:
+                out["status"] = "error"
+                out["error"]  = f"Options unavailable: {e}"
             return out
 
         if not exps:
@@ -244,7 +267,7 @@ def analyse_ticker(
         for exp_str, dte in short_exps:
             T = dte / 365
             try:
-                chain = tk.option_chain(exp_str).calls
+                chain = _yf_retry(lambda: tk.option_chain(exp_str).calls)
             except Exception:
                 continue
 
@@ -309,7 +332,7 @@ def analyse_ticker(
         for exp_str, dte in spread_exps:
             T = dte / 365
             try:
-                chain = tk.option_chain(exp_str).calls
+                chain = _yf_retry(lambda: tk.option_chain(exp_str).calls)
             except Exception:
                 continue
 
