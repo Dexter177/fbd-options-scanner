@@ -5,7 +5,7 @@ Shared web app for Dexter (UK) and Danny (US).
 Hosted free on Streamlit Community Cloud.
 
 Three tabs:
-  📡 Screener        — scan S&P 500 for FBD flush candidates
+  📡 Screener        — scan US large/mid-cap stocks for breakdown candidates
   🔍 Options Analyser — full call/spread analysis for any ticker
   📋 Watchlist        — shared list with export/import CSV
 """
@@ -90,7 +90,7 @@ _init_state()
 
 st.title("📡 FBD Options Scanner")
 st.caption(
-    f"S&P 500 flush screener · Black-Scholes options analyser · "
+    f"US large/mid-cap breakdown screener · Black-Scholes options analyser · "
     f"$1,000 max risk · {date.today().strftime('%A %d %B %Y')}"
 )
 
@@ -105,64 +105,71 @@ tab_screen, tab_analyse, tab_watch = st.tabs(
 
 with tab_screen:
 
-    st.subheader("FBD Flush Screener — S&P 500")
+    st.subheader("FBD Breakdown Screener — US Large/Mid-Cap")
     st.caption(
-        "Finds stocks making new 26-week lows with elevated volume and "
-        "oversold RSI. These are FBD watch candidates — add them to the "
-        "Watchlist and set a TradingView price alert at the recovery level."
+        "Finds US large/mid-cap stocks breaking down from 52-week lows, "
+        "26-week lows, or key support levels with elevated volume. "
+        "Add candidates to the Watchlist and set a TradingView alert at "
+        "the breakdown level for a Failed Breakdown (FBD) recovery play."
     )
 
     # ── filter controls ───────────────────────────────────────────────────
     with st.expander("⚙️ Filter settings", expanded=True):
-        fc1, fc2, fc3 = st.columns(3)
+        fc1, fc2 = st.columns(2)
         with fc1:
-            f_min_drop = st.slider(
-                "Min drop from 6-month high (%)", 10, 50, 15, step=5,
-                help="Stock must be at least this far below its 6-month peak"
+            f_flush_days = st.slider(
+                "Flush window (days)", 1, 21, 7, step=1,
+                help="Breakdown signal must have occurred within this many trading bars"
             )
-            f_min_price = st.number_input("Min price ($)", value=10.0, step=5.0, format="%.0f")
+            f_min_atr = st.slider(
+                "Min ATR(14)%", 1.0, 5.0, 2.0, step=0.5,
+                help="ATR as % of price — filters out low-volatility stocks where options premiums are too thin"
+            )
         with fc2:
-            f_max_rsi = st.slider(
-                "Max RSI(14)", 20, 55, 40, step=5,
-                help="Lower = deeper oversold. 40 catches most meaningful flushes"
-            )
             f_min_rvol = st.slider(
                 "Min relative volume", 1.0, 3.0, 1.5, step=0.1,
-                help="Today's volume ÷ 20-day average. >1.5 confirms real selling pressure"
+                help="Volume on the breakdown bar ÷ prior 20-day avg. >1.5 confirms real selling pressure"
             )
-        with fc3:
-            f_flush_days = st.slider(
-                "Flush window (days)", 1, 7, 3, step=1,
-                help="New 26-week low must have occurred within this many bars"
+            f_min_price = st.number_input("Min price ($)", value=10.0, step=5.0, format="%.0f")
+
+        with st.expander("🔧 Advanced", expanded=False):
+            f_min_oi = st.number_input(
+                "Min options OI (contracts)", value=100, step=50, min_value=0,
+                help="Combined open interest across the nearest 2 expirations"
             )
-            st.markdown("")
-            st.markdown(
-                "ℹ️ All S&P 500 companies have market cap > $14B, "
-                "so options liquidity is guaranteed."
-            )
+
+        st.caption(
+            "Universe: US-listed stocks, market cap > $1B and avg daily volume > 500K "
+            "(~1,500–2,000 names). Biotech/clinical-stage and recent IPOs excluded. "
+            "Options liquidity confirmed post-screening."
+        )
 
     run_btn = st.button("🔍  Run Scan", type="primary", use_container_width=True)
 
     # ── run scan ──────────────────────────────────────────────────────────
     if run_btn:
         current_params = dict(
-            min_drop_pct=f_min_drop,
-            max_rsi=f_max_rsi,
-            min_rel_vol=f_min_rvol,
             min_price=f_min_price,
+            min_rel_vol=f_min_rvol,
+            min_atr_pct=f_min_atr,
             flush_days=f_flush_days,
+            min_options_oi=int(f_min_oi),
         )
 
-        prog = st.progress(0, text="Fetching S&P 500 constituent list…")
+        prog = st.progress(0, text="Fetching US stock universe…")
 
         def _update_prog(pct: float):
             pct = min(float(pct), 0.99)
-            if pct < 0.10:
-                txt = "Downloading 6 months of price data…"
-            elif pct < 0.50:
-                txt = f"Scanning tickers… {int(pct*100)}%"
+            if pct < 0.06:
+                txt = "Fetching US stock universe (~1,500–2,000 stocks)…"
+            elif pct < 0.36:
+                txt = "Downloading 1 year of daily price data…"
+            elif pct < 0.87:
+                txt = f"Scanning breakdown signals… {int(pct * 100)}%"
+            elif pct < 0.98:
+                txt = "Checking options liquidity for candidates…"
             else:
-                txt = f"Applying FBD filters… {int(pct*100)}%"
+                txt = "Finalising results…"
             prog.progress(pct, text=txt)
 
         try:
@@ -189,7 +196,8 @@ with tab_screen:
         if df_scan.empty:
             st.info(
                 "No stocks passed all filters today. "
-                "Try relaxing Max RSI, reducing the Min drop %, or widening the flush window."
+                "Try widening the Flush window, reducing Min ATR%, "
+                "lowering the Min relative volume, or reducing Min options OI."
             )
         else:
             st.success(f"**{len(df_scan)} candidates** passed all filters.")
@@ -197,15 +205,18 @@ with tab_screen:
             # friendly column names for display
             disp = df_scan.copy()
             disp = disp.rename(columns={
-                "ticker":     "Ticker",
-                "company":    "Company",
-                "sector":     "Sector",
-                "price":      "Price",
-                "drop_pct":   "% from High",
-                "rsi":        "RSI",
-                "rel_vol":    "Rel Volume",
-                "prior_low":  "Prior 26w Low",
-                "recent_low": "Flush Low",
+                "ticker":       "Ticker",
+                "company":      "Company",
+                "sector":       "Sector",
+                "price":        "Price",
+                "breakdown":    "Signal",
+                "bd_level":     "BD Level",
+                "pct_extended": "% Below",
+                "rel_vol":      "Rel Vol",
+                "atr_pct":      "ATR%",
+                "rsi":          "RSI",
+                "options_oi":   "Options OI",
+                "earnings":     "Earnings",
             })
 
             st.dataframe(
@@ -213,11 +224,14 @@ with tab_screen:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Price":         st.column_config.NumberColumn(format="$%.2f"),
-                    "% from High":   st.column_config.NumberColumn(format="%.1f%%"),
-                    "Rel Volume":    st.column_config.NumberColumn(format="%.2fx"),
-                    "Prior 26w Low": st.column_config.NumberColumn(format="$%.2f"),
-                    "Flush Low":     st.column_config.NumberColumn(format="$%.2f"),
+                    "Price":      st.column_config.NumberColumn(format="$%.2f"),
+                    "BD Level":   st.column_config.NumberColumn(format="$%.2f"),
+                    "% Below":    st.column_config.NumberColumn(format="%.1f%%",
+                                      help="How far current price is below the broken level"),
+                    "Rel Vol":    st.column_config.NumberColumn(format="%.2fx"),
+                    "ATR%":       st.column_config.NumberColumn(format="%.1f%%"),
+                    "RSI":        st.column_config.NumberColumn(format="%.0f"),
+                    "Options OI": st.column_config.NumberColumn(format="%d"),
                 },
             )
 
@@ -230,9 +244,9 @@ with tab_screen:
                 sel_ticker = st.selectbox("Ticker", df_scan["ticker"].tolist(), key="s_sel_t")
             with wl_col2:
                 match_row = df_scan[df_scan["ticker"] == sel_ticker]
-                default_anchor = float(match_row["recent_low"].iloc[0]) if not match_row.empty else 0.0
+                default_anchor = float(match_row["bd_level"].iloc[0]) if not match_row.empty else 0.0
                 sel_anchor = st.number_input(
-                    "Anchor (flush low $)", value=default_anchor,
+                    "Anchor (breakdown level $)", value=default_anchor,
                     step=0.5, format="%.2f", key="s_anchor"
                 )
             with wl_col3:
