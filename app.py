@@ -16,7 +16,7 @@ import streamlit as st
 import pandas as pd
 
 from screener     import run_screener, run_fbd_screener
-from scanner_core import analyse_ticker, SETUP_TYPES, SETUP_LABELS, MAX_RISK
+from scanner_core import analyse_ticker, SETUP_TYPES, SETUP_LABELS, SETUP_DESCRIPTIONS, MAX_RISK
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -146,15 +146,15 @@ def _make_progress_cb(prog_widget):
     def _cb(pct: float):
         pct = min(float(pct), 0.99)
         if pct < 0.06:
-            txt = "Fetching US stock universe (~1,500–2,000 stocks)…"
+            txt = "Fetching US stock universe (~1,500–2,000 stocks)..."
         elif pct < 0.36:
-            txt = "Downloading 1 year of daily price data…"
+            txt = "Downloading 1 year of daily price data..."
         elif pct < 0.87:
-            txt = f"Scanning breakdown signals… {int(pct * 100)}%"
+            txt = f"Scanning breakdown signals... {int(pct * 100)}%"
         elif pct < 0.98:
-            txt = "Checking options liquidity for candidates…"
+            txt = "Checking options liquidity for candidates..."
         else:
-            txt = "Finalising results…"
+            txt = "Finalising results..."
         prog_widget.progress(pct, text=txt)
     return _cb
 
@@ -187,7 +187,7 @@ with tab_breakdown:
     bd_run = st.button("🔍  Run Scan", type="primary", use_container_width=True, key="bd_run")
 
     if bd_run:
-        prog = st.progress(0, text="Fetching US stock universe…")
+        prog = st.progress(0, text="Fetching US stock universe...")
         try:
             df_bd = run_screener(**bd_params, progress_cb=_make_progress_cb(prog))
             st.session_state.scan_results = df_bd
@@ -252,7 +252,7 @@ with tab_fbd:
     fbd_run = st.button("🔍  Run Scan", type="primary", use_container_width=True, key="fbd_run")
 
     if fbd_run:
-        prog = st.progress(0, text="Fetching US stock universe…")
+        prog = st.progress(0, text="Fetching US stock universe...")
         try:
             df_fbd = run_fbd_screener(**fbd_params, progress_cb=_make_progress_cb(prog))
             st.session_state.fbd_scan_results = df_fbd
@@ -328,6 +328,10 @@ with tab_analyse:
             key="a_setup"
         )
 
+    with st.expander("📖 Setup type guide", expanded=False):
+        for k, label in SETUP_LABELS.items():
+            st.markdown(f"**{label}** — {SETUP_DESCRIPTIONS[k]}")
+
     with st.expander("⚙️ Advanced options", expanded=False):
         adv1, adv2, adv3 = st.columns(3)
         with adv1:
@@ -342,7 +346,7 @@ with tab_analyse:
     analyse_btn = st.button("⚡  Analyse", type="primary", use_container_width=True, key="a_btn")
 
     if analyse_btn and a_ticker:
-        with st.spinner(f"Fetching options chain for {a_ticker}…"):
+        with st.spinner(f"Fetching options chain for {a_ticker}..."):
             result = _cached_analyse(
                 ticker        = a_ticker,
                 anchor        = a_anchor if a_anchor > 0 else None,
@@ -409,6 +413,20 @@ with tab_analyse:
                 st.dataframe(result["calls_df"], use_container_width=True, hide_index=True)
             else:
                 st.info(f"No liquid calls found in {int(a_swing_min)}–{int(a_swing_max)} DTE window.")
+
+            # ── swing straddles table ─────────────────────────────────────
+            strad_df = result.get("straddles_df", pd.DataFrame())
+            if not strad_df.empty:
+                st.markdown("---")
+                st.subheader(f"Swing Straddles  ({int(a_swing_min)}–{int(a_swing_max)} DTE)")
+                st.caption(
+                    "Buy the call **and** the put at the same strike — profits on a large move "
+                    "in either direction. **Move Needed** = how much the stock must move (up or down) "
+                    "to break even. Sorted cheapest first."
+                )
+                st.dataframe(strad_df, use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No liquid straddles found in {int(a_swing_min)}–{int(a_swing_max)} DTE window.")
 
             # ── LEAP calls table ──────────────────────────────────────────
             if not result["leaps_df"].empty:
