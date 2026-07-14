@@ -307,7 +307,7 @@ with tab_analyse:
 
     st.subheader("Options Analyser")
     st.caption(
-        "Enter any ticker and anchor price to get a swing call or LEAP "
+        "Enter any ticker and level to get a swing call or LEAP "
         "recommendation sized to your max risk."
     )
 
@@ -317,7 +317,7 @@ with tab_analyse:
         a_ticker = st.text_input("Ticker", value="", key="a_ticker").upper().strip()
     with ac2:
         a_anchor = st.number_input(
-            "Anchor price ($)", value=0.0, step=0.5, format="%.2f", key="a_anchor",
+            "Level ($)", value=0.0, step=0.5, format="%.2f", key="a_anchor",
             help="The level that was broken (flush low). Leave 0 to use ATM."
         )
     with ac3:
@@ -368,10 +368,10 @@ with tab_analyse:
             # ── price summary ─────────────────────────────────────────────
             pm1, pm2, pm3, pm4 = st.columns(4)
             pm1.metric("Current Price",       f"${result['current_price']:.2f}")
-            pm2.metric("Anchor",              f"${result['anchor']:.2f}")
+            pm2.metric("Level",               f"${result['anchor']:.2f}")
             pm3.metric("5-day Low",           f"${result['lo_5d']:.2f}")
             if result["recovery_pct"] is not None:
-                pm4.metric("Recovery from anchor", f"{result['recovery_pct']:+.1f}%")
+                pm4.metric("Recovery from level", f"{result['recovery_pct']:+.1f}%")
 
             fbd_color = "🟢" if "✅" in result["fbd_status"] else "🔴" if "⚠️" in result["fbd_status"] else "⚪"
             st.info(f"{fbd_color}  **FBD Status:** {result['fbd_status']}")
