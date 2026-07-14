@@ -7,24 +7,24 @@ three FBD-relevant breakdown signals:
   1. New 52-week low  — within the last flush_days bars
   2. New 26-week low  — within the last flush_days bars
   3. Key-level break  — 2+ touches within 1% of each other, each bounce
-                        >= 3%, price then breaks below that zone within
+                        ≥ 3%, price then breaks below that zone within
                         the last flush_days bars
 
 Priority for reporting: 52w Low > 26w Low > Key Level
 
 Additional filters (applied in per-ticker loop):
-  - Price > $10
-  - 20-day avg volume > 500 K  (confirmed from yfinance data)
-  - ATR(14)% > 2%              (sufficient daily range for options)
-  - Rel-vol on the breakdown bar > 1.5 x prior 20-day avg
-  - Current price within 3% below the broken level  (not extended)
-  - Biotech / clinical-stage sector excluded
-  - IPOs listed < 6 months ago excluded
+  ● Price > $10
+  ● 20-day avg volume > 500 K  (confirmed from yfinance data)
+  ● ATR(14)% > 2%              (sufficient daily range for options)
+  ● Rel-vol on the breakdown bar > 1.5 × prior 20-day avg
+  ● Current price within 3% below the broken level  (not extended)
+  ● Biotech / clinical-stage sector excluded
+  ● IPOs listed < 6 months ago excluded
 
 Post-screening (applied only to the small candidate list):
-  - Listed options chain must exist
-  - Combined open interest (nearest 2 expirations) > min_options_oi
-  - Earnings within 5 calendar days -> flag  (not excluded)
+  ● Listed options chain must exist
+  ● Combined open interest (nearest 2 expirations) > min_options_oi
+  ● Earnings within 5 calendar days → ⚠️ flag  (not excluded)
 
 Universe sources (with automatic fallback):
   Primary : NASDAQ public screener API  (no auth needed)
@@ -157,7 +157,7 @@ def _get_nasdaq_universe() -> pd.DataFrame:
     # Exclude recent IPOs (< ~6 months)
     df = df[~df.get("ipoyear", pd.Series(dtype=str)).apply(_too_recent_ipo)]
 
-    # Normalise symbols  (BRK.B -> BRK-B for yfinance)
+    # Normalise symbols  (BRK.B → BRK-B for yfinance)
     df["symbol"] = (
         df.get("symbol", pd.Series(dtype=str))
         .astype(str)
@@ -181,6 +181,7 @@ def _get_nasdaq_universe() -> pd.DataFrame:
 def _get_sp1500_universe() -> pd.DataFrame:
     """Fallback: S&P 500 + S&P 400 + S&P 600 from Wikipedia."""
     sources = [
+        # (url, ticker_col_options, name_col_options, sector_col_options)
         (
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
             ["Symbol"],
@@ -356,23 +357,23 @@ def _check_breakdown(
     hist_low  = low.iloc[:-flush_days]
     recent_lo = float(flush_cls.min())
 
-    # 52-week low
-    if len(hist_cls) >= 100:
-        hist_52w = hist_cls.iloc[-252:]
+    # ── 52-week low ──────────────────────────────────────────────────────────
+    if len(hist_cls) >= 100:                       # need reasonable history
+        hist_52w = hist_cls.iloc[-252:]            # up to 252 bars back
         if len(hist_52w) >= 50:
             prior_52w = float(hist_52w.min())
             if recent_lo < prior_52w:
                 return "52w Low", prior_52w, recent_lo
 
-    # 26-week low
+    # ── 26-week low ──────────────────────────────────────────────────────────
     if len(hist_cls) >= 20:
-        hist_26w = hist_cls.iloc[-130:]
+        hist_26w = hist_cls.iloc[-130:]            # ~26 trading weeks
         if len(hist_26w) >= 20:
             prior_26w = float(hist_26w.min())
             if recent_lo < prior_26w:
                 return "26w Low", prior_26w, recent_lo
 
-    # Key-level breakdown
+    # ── Key-level breakdown ──────────────────────────────────────────────────
     levels = _find_key_levels(hist_cls, hist_low)
     if levels:
         flush_lo_min = float(flush_low.values.min())
@@ -492,7 +493,7 @@ def run_screener(
         Returns empty DataFrame if no candidates pass all filters.
     """
 
-    # 1. Universe
+    # ── 1. Universe ───────────────────────────────────────────────────────────
     if progress_cb:
         progress_cb(0.02)
 
@@ -503,7 +504,7 @@ def run_screener(
     if progress_cb:
         progress_cb(0.06)
 
-    # 2. Batch-download 1 year of daily OHLCV
+    # ── 2. Batch-download 1 year of daily OHLCV ──────────────────────────────
     raw = yf.download(
         tickers,
         period      = "1y",
@@ -517,7 +518,7 @@ def run_screener(
     if progress_cb:
         progress_cb(0.36)
 
-    # 3. Per-ticker screening loop
+    # ── 3. Per-ticker screening loop ──────────────────────────────────────────
     candidates = []
 
     for i, ticker in enumerate(tickers):
@@ -550,11 +551,11 @@ def run_screener(
 
             current = float(close.iloc[-1])
 
-            # Price floor
+            # ── Price floor ───────────────────────────────────────────────────
             if current < min_price or np.isnan(current):
                 continue
 
-            # 20-day avg volume
+            # ── 20-day avg volume  ────────────────────────────────────────────
             avg_vol_20 = (
                 float(volume.iloc[-21:-1].mean())
                 if len(volume) > 21
@@ -563,7 +564,7 @@ def run_screener(
             if avg_vol_20 < _MIN_AVG_VOLUME:
                 continue
 
-            # ATR %
+            # ── ATR % ─────────────────────────────────────────────────────────
             atr_series = _calc_atr(high, low, close)
             atr_val    = float(atr_series.iloc[-1])
             if np.isnan(atr_val) or current <= 0:
@@ -572,17 +573,19 @@ def run_screener(
             if atr_pct < min_atr_pct:
                 continue
 
-            # Breakdown signal
+            # ── Breakdown signal ──────────────────────────────────────────────
             btype, blevel, _blow = _check_breakdown(close, low, flush_days)
             if btype is None:
                 continue
 
-            # Distance from broken level
+            # ── Distance from broken level ────────────────────────────────────
+            # pct_extended > 0  → price is below the level
+            # pct_extended > max_pct_extended → too far below, skip
             pct_extended = (blevel - current) / blevel * 100
             if pct_extended > max_pct_extended:
                 continue
 
-            # Relative volume on the breakdown bar
+            # ── Relative volume on the breakdown bar ──────────────────────────
             flush_low_slice = low.iloc[-flush_days:]
             flush_offset    = int(flush_low_slice.values.argmin())
             abs_bd_pos      = len(close) - flush_days + flush_offset
@@ -596,7 +599,7 @@ def run_screener(
             if rel_vol < min_rel_vol:
                 continue
 
-            # RSI (informational, not a filter)
+            # ── RSI (informational, not used as a filter) ─────────────────────
             rsi_val = float(_calc_rsi(close).iloc[-1])
 
             candidates.append({
@@ -621,7 +624,7 @@ def run_screener(
             progress_cb(1.0)
         return pd.DataFrame()
 
-    # 4. Post-screening: options OI + earnings flag
+    # ── 4. Post-screening: options OI + earnings flag ─────────────────────────
     final = []
 
     for j, cand in enumerate(candidates):
@@ -635,7 +638,7 @@ def run_screener(
                 continue
 
             days_out      = _earnings_days_out(tk)
-            earnings_flag = f"!! {days_out}d earnings" if 0 <= days_out <= 5 else ""
+            earnings_flag = f"⚠️ {days_out}d" if 0 <= days_out <= 5 else ""
 
             row = dict(cand)
             row["options_oi"] = total_oi
@@ -653,7 +656,7 @@ def run_screener(
             progress_cb(1.0)
         return pd.DataFrame()
 
-    # 5. Build output DataFrame
+    # ── 5. Build output DataFrame ─────────────────────────────────────────────
     df_out = pd.DataFrame(final)
     df_out = df_out.merge(meta, on="ticker", how="left")
 
@@ -670,6 +673,223 @@ def run_screener(
     ordered = [
         "ticker", "company", "sector",
         "price", "breakdown", "bd_level", "pct_extended",
+        "rel_vol", "atr_pct", "rsi", "options_oi", "earnings",
+    ]
+    df_out = df_out[[c for c in ordered if c in df_out.columns]]
+
+    if progress_cb:
+        progress_cb(1.0)
+
+    return df_out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  FAKE BREAKDOWN SCREENER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_fbd_screener(
+    min_price:      float = 10.0,
+    min_rel_vol:    float = 1.5,
+    min_atr_pct:    float = 2.0,
+    flush_days:     int   = 7,
+    min_options_oi: int   = 100,
+    progress_cb            = None,
+) -> pd.DataFrame:
+    """
+    Scan US large-/mid-cap stocks for Fake Breakdown (FBD) setups.
+
+    A stock qualifies when it broke BELOW a key level (52w low / 26w low /
+    key support) within the last flush_days bars AND current price has since
+    reclaimed back ABOVE that level.
+
+    Same ATR%, relative-volume, and options-OI filters as run_screener().
+    Output column is ``pct_above`` (how far current price is above the
+    reclaimed level).
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ticker, company, sector, price, breakdown, bd_level,
+                 pct_above, rel_vol, atr_pct, rsi, options_oi, earnings
+        Sorted by signal priority (52w > 26w > Key Level) then pct_above.
+        Returns empty DataFrame if no candidates pass all filters.
+    """
+
+    # ── 1. Universe ───────────────────────────────────────────────────────────
+    if progress_cb:
+        progress_cb(0.02)
+
+    meta    = get_us_tickers()
+    tickers = meta["ticker"].tolist()
+    n       = len(tickers)
+
+    if progress_cb:
+        progress_cb(0.06)
+
+    # ── 2. Batch-download 1 year of daily OHLCV ──────────────────────────────
+    raw = yf.download(
+        tickers,
+        period      = "1y",
+        interval    = "1d",
+        group_by    = "ticker",
+        auto_adjust = True,
+        progress    = False,
+        threads     = True,
+    )
+
+    if progress_cb:
+        progress_cb(0.36)
+
+    # ── 3. Per-ticker screening loop ──────────────────────────────────────────
+    candidates = []
+
+    for i, ticker in enumerate(tickers):
+        if progress_cb and i % 100 == 0:
+            progress_cb(0.36 + 0.49 * (i / n))
+
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                df = raw[ticker].dropna(how="all")
+            else:
+                df = raw.dropna(how="all")
+
+            if len(df) < 40:
+                continue
+
+            close  = df["Close"].squeeze().dropna()
+            high   = df["High"].squeeze().dropna()
+            low    = df["Low"].squeeze().dropna()
+            volume = df["Volume"].squeeze().dropna()
+
+            min_len = min(len(close), len(high), len(low), len(volume))
+            if min_len < 40:
+                continue
+            close  = close.iloc[-min_len:]
+            high   = high.iloc[-min_len:]
+            low    = low.iloc[-min_len:]
+            volume = volume.iloc[-min_len:]
+
+            current = float(close.iloc[-1])
+
+            # ── Price floor ───────────────────────────────────────────────────
+            if current < min_price or np.isnan(current):
+                continue
+
+            # ── 20-day avg volume ─────────────────────────────────────────────
+            avg_vol_20 = (
+                float(volume.iloc[-21:-1].mean())
+                if len(volume) > 21
+                else float(volume.mean())
+            )
+            if avg_vol_20 < _MIN_AVG_VOLUME:
+                continue
+
+            # ── ATR % ─────────────────────────────────────────────────────────
+            atr_series = _calc_atr(high, low, close)
+            atr_val    = float(atr_series.iloc[-1])
+            if np.isnan(atr_val) or current <= 0:
+                continue
+            atr_pct = atr_val / current * 100
+            if atr_pct < min_atr_pct:
+                continue
+
+            # ── Breakdown signal ──────────────────────────────────────────────
+            btype, blevel, _blow = _check_breakdown(close, low, flush_days)
+            if btype is None:
+                continue
+
+            # ── FBD qualification: current price must have RECLAIMED above ────
+            if current <= blevel:
+                continue  # still below — not yet an FBD setup
+            pct_above = (current - blevel) / blevel * 100
+
+            # ── Relative volume on the breakdown bar ──────────────────────────
+            flush_low_slice = low.iloc[-flush_days:]
+            flush_offset    = int(flush_low_slice.values.argmin())
+            abs_bd_pos      = len(close) - flush_days + flush_offset
+            vol_on_bd       = float(volume.iloc[abs_bd_pos])
+            avg_start       = max(0, abs_bd_pos - 20)
+            avg_vol_bd      = (
+                float(volume.iloc[avg_start:abs_bd_pos].mean())
+                if abs_bd_pos > 0 else 0.0
+            )
+            rel_vol = vol_on_bd / avg_vol_bd if avg_vol_bd > 0 else 0.0
+            if rel_vol < min_rel_vol:
+                continue
+
+            # ── RSI (informational) ───────────────────────────────────────────
+            rsi_val = float(_calc_rsi(close).iloc[-1])
+
+            candidates.append({
+                "ticker":    ticker,
+                "price":     round(current, 2),
+                "breakdown": btype,
+                "bd_level":  round(blevel, 2),
+                "pct_above": round(pct_above, 1),
+                "rel_vol":   round(rel_vol, 2),
+                "atr_pct":   round(atr_pct, 1),
+                "rsi":       round(rsi_val, 1) if not np.isnan(rsi_val) else None,
+            })
+
+        except Exception:
+            continue
+
+    if progress_cb:
+        progress_cb(0.87)
+
+    if not candidates:
+        if progress_cb:
+            progress_cb(1.0)
+        return pd.DataFrame()
+
+    # ── 4. Post-screening: options OI + earnings flag ─────────────────────────
+    final = []
+
+    for j, cand in enumerate(candidates):
+        if progress_cb:
+            progress_cb(0.87 + 0.10 * (j / max(len(candidates), 1)))
+        try:
+            tk = yf.Ticker(cand["ticker"])
+
+            has_opts, total_oi = _get_options_oi(tk, min_oi=min_options_oi)
+            if not has_opts or total_oi < min_options_oi:
+                continue
+
+            days_out      = _earnings_days_out(tk)
+            earnings_flag = f"⚠️ {days_out}d" if 0 <= days_out <= 5 else ""
+
+            row = dict(cand)
+            row["options_oi"] = total_oi
+            row["earnings"]   = earnings_flag
+            final.append(row)
+
+        except Exception:
+            continue
+
+    if progress_cb:
+        progress_cb(0.98)
+
+    if not final:
+        if progress_cb:
+            progress_cb(1.0)
+        return pd.DataFrame()
+
+    # ── 5. Build output DataFrame ─────────────────────────────────────────────
+    df_out = pd.DataFrame(final)
+    df_out = df_out.merge(meta, on="ticker", how="left")
+
+    rank_map = {"52w Low": 0, "26w Low": 1, "Key Level": 2}
+    df_out["_rank"] = df_out["breakdown"].map(rank_map).fillna(3)
+    df_out = (
+        df_out
+        .sort_values(["_rank", "pct_above"])
+        .drop(columns=["_rank"])
+        .reset_index(drop=True)
+    )
+
+    ordered = [
+        "ticker", "company", "sector",
+        "price", "breakdown", "bd_level", "pct_above",
         "rel_vol", "atr_pct", "rsi", "options_oi", "earnings",
     ]
     df_out = df_out[[c for c in ordered if c in df_out.columns]]
