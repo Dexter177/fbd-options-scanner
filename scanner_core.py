@@ -127,13 +127,14 @@ def _score_call(delta: float, theta: float, mid: float,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_ticker(
-    ticker:            str,
-    anchor:            Optional[float],
-    setup_type:        str  = "FBD_WATCH",
-    max_risk:          int  = MAX_RISK,
-    short_min_dte:     int  = 7,
-    short_max_dte:     int  = 35,
-    spread_dte_target: int  = 60,
+    ticker:        str,
+    anchor:        Optional[float],
+    setup_type:    str  = "FBD_WATCH",
+    max_risk:      int  = MAX_RISK,
+    swing_min_dte: int  = 7,
+    swing_max_dte: int  = 35,
+    leap_min_dte:  int  = 180,
+    leap_max_dte:  int  = 365,
 ) -> dict:
     """
     Run full options analysis for one ticker.
@@ -141,17 +142,17 @@ def analyse_ticker(
     Parameters
     ----------
     ticker : str
-        Stock symbol (e.g. "ORCL").
+        Stock symbol (e.g. "AAPL").
     anchor : float or None
         The price level that was broken (flush low). None = use ATM.
     setup_type : str
         One of the keys in SETUP_TYPES.
     max_risk : int
         Maximum USD risk per trade (default $1,000).
-    short_min_dte / short_max_dte : int
-        DTE range for directional call search.
-    spread_dte_target : int
-        Target DTE for debit spread search (±15 days window).
+    swing_min_dte / swing_max_dte : int
+        DTE range for swing directional call search.
+    leap_min_dte / leap_max_dte : int
+        DTE range for long-dated LEAP call search (default 180–365).
 
     Returns
     -------
@@ -165,19 +166,18 @@ def analyse_ticker(
       recovery_pct    float | None
       fbd_status      str
       calls_df        pd.DataFrame (empty if none found)
-      spreads_df      pd.DataFrame (empty if none found)
+      leaps_df        pd.DataFrame (empty if none found)
       recommendation  dict | None
-        .type         "CALL" | "SPREAD"
+        .type         "CALL" | "LEAP"
         .primary      str    headline trade line
-        .detail       str    outlay / B/E / max profit
-        .greeks       str    delta / theta / IV or R:R
+        .detail       str    outlay / B/E
+        .greeks       str    delta / theta / IV
         .outlay       float  total USD cost
         .rationale    str    why this structure
         .warning      str | None
         .alt          str | None  alternative trade
     """
     prefer_call, rationale = SETUP_TYPES.get(setup_type, (False, ""))
-    spread_window = 15
     today = date.today()
 
     out = {
@@ -194,10 +194,10 @@ def analyse_ticker(
         "recovery_pct":  None,
         "fbd_status":    "—",
         "calls_df":      pd.DataFrame(),
-        "spreads_df":    pd.DataFrame(),
+        "leaps_df":      pd.DataFrame(),
         "recommendation": None,
         "_best_call":    None,
-        "_best_spread":  None,
+        "_best_leap":    None,
     }
 
     try:
@@ -257,14 +257,14 @@ def analyse_ticker(
         def _dte(e: str) -> int:
             return (datetime.strptime(e, "%Y-%m-%d").date() - today).days
 
-        short_exps  = [(e, _dte(e)) for e in exps
-                       if short_min_dte <= _dte(e) <= short_max_dte]
-        spread_exps = [(e, _dte(e)) for e in exps
-                       if abs(_dte(e) - spread_dte_target) <= spread_window]
+        swing_exps = [(e, _dte(e)) for e in exps
+                      if swing_min_dte <= _dte(e) <= swing_max_dte]
+        leap_exps  = [(e, _dte(e)) for e in exps
+                      if leap_min_dte <= _dte(e) <= leap_max_dte]
 
-        # ── section 1: directional calls ──────────────────────────────────
+        # ── section 1: swing directional calls ────────────────────────────
         call_rows = []
-        for exp_str, dte in short_exps:
+        for exp_str, dte in swing_exps:
             T = dte / 365
             try:
                 chain = _yf_retry(lambda: tk.option_chain(exp_str).calls)
@@ -327,89 +327,74 @@ def analyse_ticker(
                     .head(8).reset_index(drop=True)
             )
 
-        # ── section 2: debit spreads ──────────────────────────────────────
-        spread_rows = []
-        for exp_str, dte in spread_exps:
+        # ── section 2: LEAP directional calls ────────────────────────────
+        leap_rows = []
+        for exp_str, dte in leap_exps:
             T = dte / 365
             try:
                 chain = _yf_retry(lambda: tk.option_chain(exp_str).calls)
             except Exception:
                 continue
 
-            # build strike map
-            smap: dict = {}
+            chain = chain[
+                (chain.strike >= anch * 0.85) &
+                (chain.strike <= current * 1.30)
+            ]
+
             for _, r in chain.iterrows():
                 k   = float(r.strike)
                 bid = float(r.get("bid", 0) or 0)
                 ask = float(r.get("ask", 0) or 0)
                 iv  = float(r.get("impliedVolatility", 0) or 0)
+                _v  = r.get("volume", 0)
+                _o  = r.get("openInterest", 0)
+                vol = int(_v) if (_v == _v and _v) else 0
+                oi  = int(_o) if (_o == _o and _o) else 0
                 mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
-                if iv > 0 and mid > 0.01:
-                    smap[k] = {"bid": bid, "ask": ask, "mid": mid, "iv": iv}
 
-            ks = sorted(smap)
-            for i, bk in enumerate(ks):
-                if bk < anch * 0.93 or bk > current * 1.15:
-                    continue
-                si = i + SPREAD_W
-                sk = ks[si] if si < len(ks) else None
-                if sk is None or sk == bk:
-                    continue
+                if mid < 0.01 or iv <= 0:                         continue
+                if vol < MIN_VOLUME or oi < MIN_OI:                continue
+                if bid > 0 and ask > 0 and (ask - bid)/mid > MAX_BA_PCT: continue
 
-                bd = smap[bk]
-                sd = smap[sk]
-                nd  = round(bd["ask"] - sd["bid"], 4)   # net debit
-                if nd <= 0:
-                    continue
+                g = bs_greeks(current, k, T, RISK_FREE, iv)
+                if not g or not (MIN_DELTA <= g["delta"] <= MAX_DELTA): continue
 
-                sw  = sk - bk                            # spread width
-                mp  = round(sw - nd, 4)                  # max profit/contract
-                be  = round(bk + nd, 2)                  # break-even
-                rr  = round(mp / nd, 2) if nd > 0 else 0
-                if rr < 0.4:
-                    continue
+                max_c  = max(1, int(max_risk / (ask * 100)))
+                outlay = round(min(max_c * ask * 100, max_risk), 0)
+                sc     = _score_call(g["delta"], g["theta"], mid, vol, oi)
+                be     = round(k + ask, 2)
 
-                gb = bs_greeks(current, bk, T, RISK_FREE, bd["iv"])
-                gs = bs_greeks(current, sk, T, RISK_FREE, sd["iv"])
-                if not gb or not gs:
-                    continue
-
-                nd_delta = round(gb["delta"] - gs["delta"], 3)
-                nd_theta = round(gb["theta"] - gs["theta"], 5)
-                max_c    = max(1, int(max_risk / (nd * 100)))
-                tot_mp   = round(max_c * mp * 100, 0)
-                outlay   = round(max_c * nd * 100, 0)
-
-                spread_rows.append({
-                    "Expiry":     f"{exp_str} ({dte}d)",
-                    "Spread":     f"${bk:.0f}/${sk:.0f}C",
-                    "Debit":      f"${nd:.2f}",
-                    "Max P/L":    f"${mp:.2f}",
-                    "B/E":        f"${be:.2f}",
-                    "R:R":        f"{rr:.1f}x",
-                    "Net Δ":      f"{nd_delta:.3f}",
-                    "Net θ":      f"-${abs(nd_theta):.4f}/d",
-                    "Contracts":  max_c,
-                    "Outlay":     f"${outlay:.0f}",
-                    "Max Profit": f"${tot_mp:.0f}",
+                leap_rows.append({
+                    "Expiry":    f"{exp_str} ({dte}d)",
+                    "Strike":    f"${k:.2f}",
+                    "Ask":       f"${ask:.2f}",
+                    "B/E":       f"${be:.2f}",
+                    "Delta":     f"{g['delta']:.2f}",
+                    "Theta":     f"-${abs(g['theta']):.3f}/d",
+                    "IV":        f"{iv*100:.0f}%",
+                    "Volume":    vol,
+                    "OI":        oi,
+                    "Contracts": max_c,
+                    "Outlay":    f"${outlay:.0f}",
+                    "Score":     sc,
                     # private
-                    "_rr": rr, "_nd": nd, "_mp": mp, "_be": be,
-                    "_exp": exp_str, "_dte": dte,
-                    "_bk": bk, "_sk": sk, "_nd_delta": nd_delta,
-                    "_outlay": outlay, "_tot_mp": tot_mp,
+                    "_score": sc, "_ask": ask, "_exp": exp_str,
+                    "_dte": dte, "_k": k, "_delta": g["delta"],
+                    "_theta": g["theta"], "_iv": iv, "_be": be,
+                    "_outlay": outlay,
                 })
 
-        if spread_rows:
-            df_s = pd.DataFrame(spread_rows).sort_values("_rr", ascending=False)
-            out["_best_spread"] = df_s.iloc[0].to_dict()
-            out["spreads_df"]   = (
-                df_s.drop(columns=[c for c in df_s.columns if c.startswith("_")])
+        if leap_rows:
+            df_l = pd.DataFrame(leap_rows).sort_values("_score", ascending=False)
+            out["_best_leap"] = df_l.iloc[0].to_dict()
+            out["leaps_df"]   = (
+                df_l.drop(columns=[c for c in df_l.columns if c.startswith("_")])
                     .head(8).reset_index(drop=True)
             )
 
         # ── recommendation ────────────────────────────────────────────────
         bc = out["_best_call"]
-        bs = out["_best_spread"]
+        bl = out["_best_leap"]
         warning = SETUP_WARNINGS.get(setup_type)
 
         if prefer_call and bc:
@@ -432,38 +417,34 @@ def analyse_ticker(
                 "rationale": rationale,
                 "warning":   warning,
                 "alt": (
-                    f"Alt spread: "
-                    f"{max(1, int(max_risk/(bs['_nd']*100)))}× "
-                    f"{bs['_exp']}  ${bs['_bk']:.0f}/${bs['_sk']:.0f}C  ·  "
-                    f"Debit ${bs['_nd']:.2f}  ·  R:R {bs['_rr']}x"
-                ) if bs else None,
+                    f"Alt LEAP: "
+                    f"{max(1, int(max_risk/(bl['_ask']*100)))}× "
+                    f"{bl['_exp']}  ${bl['_k']:.2f}C @ ${bl['_ask']:.2f}  ·  "
+                    f"Delta {bl['_delta']:.2f}"
+                ) if bl else None,
             }
 
-        elif bs:
-            max_s  = max(1, int(max_risk / (bs["_nd"] * 100)))
-            outlay = round(max_s * bs["_nd"] * 100, 0)
-            tot    = round(max_s * bs["_mp"] * 100, 0)
+        elif bl:
+            max_l  = max(1, int(max_risk / (bl["_ask"] * 100)))
+            outlay = round(min(max_l * bl["_ask"] * 100, max_risk), 0)
             out["recommendation"] = {
-                "type":      "SPREAD",
-                "primary":   (
-                    f"BUY {max_s}× {bs['_exp']}  "
-                    f"${bs['_bk']:.0f}/${bs['_sk']:.0f}C spread"
-                ),
+                "type":      "LEAP",
+                "primary":   f"BUY {max_l}× {bl['_exp']}  ${bl['_k']:.2f} Call  [LEAP]",
                 "detail":    (
-                    f"Net debit ${bs['_nd']:.2f}  ·  "
+                    f"Pay ~${bl['_ask']:.2f}/contract  ·  "
                     f"Total outlay ${outlay:.0f}  ·  "
-                    f"Max profit ${tot:.0f}"
+                    f"Break-even ${bl['_be']:.2f}"
                 ),
                 "greeks":    (
-                    f"Break-even ${bs['_be']:.2f}  ·  "
-                    f"R:R {bs['_rr']}x  ·  "
-                    f"Net Δ {bs['_nd_delta']:.3f}"
+                    f"Delta {bl['_delta']:.2f}  ·  "
+                    f"Theta −${abs(bl['_theta']):.3f}/day  ·  "
+                    f"IV {bl['_iv']*100:.0f}%"
                 ),
                 "outlay":    outlay,
                 "rationale": rationale,
                 "warning":   warning,
                 "alt": (
-                    f"Alt call: "
+                    f"Alt swing call: "
                     f"{max(1, int(max_risk/(bc['_ask']*100)))}× "
                     f"{bc['_exp']}  ${bc['_k']:.2f}C @ ${bc['_ask']:.2f}  ·  "
                     f"Delta {bc['_delta']:.2f}"
@@ -475,7 +456,7 @@ def analyse_ticker(
             outlay = round(min(max_c * bc["_ask"] * 100, max_risk), 0)
             out["recommendation"] = {
                 "type":      "CALL",
-                "primary":   f"BUY {max_c}× {bc['_exp']}  ${bc['_k']:.2f} Call  [no spread found]",
+                "primary":   f"BUY {max_c}× {bc['_exp']}  ${bc['_k']:.2f} Call  [no LEAP found]",
                 "detail":    (
                     f"Pay ~${bc['_ask']:.2f}  ·  "
                     f"Total ${outlay:.0f}  ·  "
