@@ -1,35 +1,30 @@
 """
 app.py  —  FBD Options Scanner (Streamlit)
 ==========================================
-Shared web app for Dexter (UK) and Danny (US).
-Hosted free on Streamlit Community Cloud.
-
 Three tabs:
-  📡 Screener        — scan US large/mid-cap stocks for breakdown candidates
-  🔍 Options Analyser — full call/spread analysis for any ticker
-  📋 Watchlist        — shared list with export/import CSV
+  📡 Breakdown Scanner      — scan US large/mid-cap stocks for breakdown candidates
+  🎯 Fake Breakdown Scanner  — stocks that broke down and have since reclaimed
+  🔍 Options Analyser        — full swing call / LEAP analysis for any ticker
 """
 
 import warnings
 warnings.filterwarnings("ignore")
 
 from datetime import date, datetime
-import io
 
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 
-from screener    import run_screener
+from screener     import run_screener, run_fbd_screener
 from scanner_core import analyse_ticker, SETUP_TYPES, SETUP_LABELS, MAX_RISK
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_analyse(ticker, anchor, setup_type, max_risk,
-                    short_min_dte, short_max_dte, spread_dte_target):
+                    swing_min_dte, swing_max_dte, leap_min_dte, leap_max_dte):
     """Cache options-chain results for 5 min to avoid Yahoo rate-limits."""
     return analyse_ticker(ticker, anchor, setup_type, max_risk,
-                          short_min_dte, short_max_dte, spread_dte_target)
+                          swing_min_dte, swing_max_dte, leap_min_dte, leap_max_dte)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -43,12 +38,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# custom CSS tweaks
 st.markdown("""
 <style>
-    /* tighten metric padding */
     div[data-testid="metric-container"] { padding: 8px 12px; }
-    /* recommendation box */
     .rec-box {
         background: #161b22;
         border: 1px solid #00d395;
@@ -72,10 +64,12 @@ st.markdown("""
 
 def _init_state():
     defaults = {
-        "watchlist":    [],     # list of dicts
-        "scan_results": None,   # pd.DataFrame | None
-        "scan_params":  None,   # dict of params used for last scan
-        "scan_time":    None,   # datetime
+        "scan_results":     None,   # pd.DataFrame | None  (breakdown scanner)
+        "scan_params":      None,
+        "scan_time":        None,
+        "fbd_scan_results": None,   # pd.DataFrame | None  (FBD scanner)
+        "fbd_scan_params":  None,
+        "fbd_scan_time":    None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -90,121 +84,136 @@ _init_state()
 
 st.title("📡 FBD Options Scanner")
 st.caption(
-    f"US large/mid-cap breakdown screener · Black-Scholes options analyser · "
+    f"US large/mid-cap breakdown & fake-breakdown screener · Black-Scholes options analyser · "
     f"$1,000 max risk · {date.today().strftime('%A %d %B %Y')}"
 )
 
-tab_screen, tab_analyse, tab_watch = st.tabs(
-    ["📡  Screener", "🔍  Options Analyser", "📋  Watchlist"]
+tab_breakdown, tab_fbd, tab_analyse = st.tabs(
+    ["📡  Breakdown Scanner", "🎯  Fake Breakdown Scanner", "🔍  Options Analyser"]
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 — SCREENER
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+#  SHARED HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-with tab_screen:
-
-    st.subheader("FBD Breakdown Screener — US Large/Mid-Cap")
-    st.caption(
-        "Finds US large/mid-cap stocks breaking down from 52-week lows, "
-        "26-week lows, or key support levels with elevated volume. "
-        "Add candidates to the Watchlist and set a TradingView alert at "
-        "the breakdown level for a Failed Breakdown (FBD) recovery play."
-    )
-
-    # ── filter controls ───────────────────────────────────────────────────
+def _scan_filter_ui(key_prefix: str) -> dict:
+    """Render filter controls; returns dict of scan params."""
     with st.expander("⚙️ Filter settings", expanded=True):
         fc1, fc2 = st.columns(2)
         with fc1:
-            f_flush_days = st.slider(
+            flush_days = st.slider(
                 "Flush window (days)", 1, 21, 7, step=1,
+                key=f"{key_prefix}_flush",
                 help="Breakdown signal must have occurred within this many trading bars"
             )
-            f_min_atr = st.slider(
+            min_atr = st.slider(
                 "Min ATR(14)%", 1.0, 5.0, 2.0, step=0.5,
+                key=f"{key_prefix}_atr",
                 help="ATR as % of price — filters out low-volatility stocks where options premiums are too thin"
             )
         with fc2:
-            f_min_rvol = st.slider(
+            min_rvol = st.slider(
                 "Min relative volume", 1.0, 3.0, 1.5, step=0.1,
+                key=f"{key_prefix}_rvol",
                 help="Volume on the breakdown bar ÷ prior 20-day avg. >1.5 confirms real selling pressure"
             )
-            f_min_price = st.number_input("Min price ($)", value=10.0, step=5.0, format="%.0f")
-
+            min_price = st.number_input(
+                "Min price ($)", value=10.0, step=5.0, format="%.0f",
+                key=f"{key_prefix}_price"
+            )
         with st.expander("🔧 Advanced", expanded=False):
-            f_min_oi = st.number_input(
+            min_oi = st.number_input(
                 "Min options OI (contracts)", value=100, step=50, min_value=0,
+                key=f"{key_prefix}_oi",
                 help="Combined open interest across the nearest 2 expirations"
             )
-
         st.caption(
             "Universe: US-listed stocks, market cap > $1B and avg daily volume > 500K "
             "(~1,500–2,000 names). Biotech/clinical-stage and recent IPOs excluded. "
             "Options liquidity confirmed post-screening."
         )
+    return dict(
+        flush_days    = flush_days,
+        min_atr_pct   = min_atr,
+        min_rel_vol   = min_rvol,
+        min_price     = min_price,
+        min_options_oi= int(min_oi),
+    )
 
-    run_btn = st.button("🔍  Run Scan", type="primary", use_container_width=True)
 
-    # ── run scan ──────────────────────────────────────────────────────────
-    if run_btn:
-        current_params = dict(
-            min_price=f_min_price,
-            min_rel_vol=f_min_rvol,
-            min_atr_pct=f_min_atr,
-            flush_days=f_flush_days,
-            min_options_oi=int(f_min_oi),
-        )
+def _make_progress_cb(prog_widget):
+    def _cb(pct: float):
+        pct = min(float(pct), 0.99)
+        if pct < 0.06:
+            txt = "Fetching US stock universe (~1,500–2,000 stocks)…"
+        elif pct < 0.36:
+            txt = "Downloading 1 year of daily price data…"
+        elif pct < 0.87:
+            txt = f"Scanning breakdown signals… {int(pct * 100)}%"
+        elif pct < 0.98:
+            txt = "Checking options liquidity for candidates…"
+        else:
+            txt = "Finalising results…"
+        prog_widget.progress(pct, text=txt)
+    return _cb
 
+
+_SCAN_COL_CONFIG = {
+    "Price":      st.column_config.NumberColumn(format="$%.2f"),
+    "BD Level":   st.column_config.NumberColumn(format="$%.2f"),
+    "Rel Vol":    st.column_config.NumberColumn(format="%.2fx"),
+    "ATR%":       st.column_config.NumberColumn(format="%.1f%%"),
+    "RSI":        st.column_config.NumberColumn(format="%.0f"),
+    "Options OI": st.column_config.NumberColumn(format="%d"),
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 1 — BREAKDOWN SCANNER
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_breakdown:
+
+    st.subheader("Breakdown Scanner — US Large/Mid-Cap")
+    st.caption(
+        "Finds US large/mid-cap stocks breaking down from 52-week lows, "
+        "26-week lows, or key support levels with elevated volume. "
+        "Candidates still below the broken level — watch for a reclaim, "
+        "then open the Options Analyser to size the trade."
+    )
+
+    bd_params = _scan_filter_ui("bd")
+    bd_run = st.button("🔍  Run Scan", type="primary", use_container_width=True, key="bd_run")
+
+    if bd_run:
         prog = st.progress(0, text="Fetching US stock universe…")
-
-        def _update_prog(pct: float):
-            pct = min(float(pct), 0.99)
-            if pct < 0.06:
-                txt = "Fetching US stock universe (~1,500–2,000 stocks)…"
-            elif pct < 0.36:
-                txt = "Downloading 1 year of daily price data…"
-            elif pct < 0.87:
-                txt = f"Scanning breakdown signals… {int(pct * 100)}%"
-            elif pct < 0.98:
-                txt = "Checking options liquidity for candidates…"
-            else:
-                txt = "Finalising results…"
-            prog.progress(pct, text=txt)
-
         try:
-            df_scan = run_screener(**current_params, progress_cb=_update_prog)
-            st.session_state.scan_results = df_scan
-            st.session_state.scan_params  = current_params
+            df_bd = run_screener(**bd_params, progress_cb=_make_progress_cb(prog))
+            st.session_state.scan_results = df_bd
+            st.session_state.scan_params  = bd_params
             st.session_state.scan_time    = datetime.now()
         except Exception as e:
             st.error(f"Scan failed: {e}")
-            df_scan = pd.DataFrame()
-
+            df_bd = pd.DataFrame()
         prog.empty()
 
-    # ── results ───────────────────────────────────────────────────────────
-    df_scan = st.session_state.scan_results
+    df_bd = st.session_state.scan_results
 
-    if df_scan is not None:
+    if df_bd is not None:
         if st.session_state.scan_time:
             st.caption(
-                f"Last scanned: {st.session_state.scan_time.strftime('%H:%M:%S')} — "
-                f"re-run to refresh"
+                f"Last scanned: {st.session_state.scan_time.strftime('%H:%M:%S')} — re-run to refresh"
             )
-
-        if df_scan.empty:
+        if df_bd.empty:
             st.info(
                 "No stocks passed all filters today. "
                 "Try widening the Flush window, reducing Min ATR%, "
                 "lowering the Min relative volume, or reducing Min options OI."
             )
         else:
-            st.success(f"**{len(df_scan)} candidates** passed all filters.")
-
-            # friendly column names for display
-            disp = df_scan.copy()
-            disp = disp.rename(columns={
+            st.success(f"**{len(df_bd)} candidates** passed all filters.")
+            disp = df_bd.rename(columns={
                 "ticker":       "Ticker",
                 "company":      "Company",
                 "sector":       "Sector",
@@ -218,104 +227,103 @@ with tab_screen:
                 "options_oi":   "Options OI",
                 "earnings":     "Earnings",
             })
-
-            st.dataframe(
-                disp,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Price":      st.column_config.NumberColumn(format="$%.2f"),
-                    "BD Level":   st.column_config.NumberColumn(format="$%.2f"),
-                    "% Below":    st.column_config.NumberColumn(format="%.1f%%",
-                                      help="How far current price is below the broken level"),
-                    "Rel Vol":    st.column_config.NumberColumn(format="%.2fx"),
-                    "ATR%":       st.column_config.NumberColumn(format="%.1f%%"),
-                    "RSI":        st.column_config.NumberColumn(format="%.0f"),
-                    "Options OI": st.column_config.NumberColumn(format="%d"),
-                },
+            col_cfg = dict(_SCAN_COL_CONFIG)
+            col_cfg["% Below"] = st.column_config.NumberColumn(
+                format="%.1f%%", help="How far current price is below the broken level"
             )
-
-            # ── add to watchlist ──────────────────────────────────────────
-            st.markdown("---")
-            st.subheader("Add to Watchlist")
-
-            wl_col1, wl_col2, wl_col3 = st.columns([2, 2, 3])
-            with wl_col1:
-                sel_ticker = st.selectbox("Ticker", df_scan["ticker"].tolist(), key="s_sel_t")
-            with wl_col2:
-                match_row = df_scan[df_scan["ticker"] == sel_ticker]
-                default_anchor = float(match_row["bd_level"].iloc[0]) if not match_row.empty else 0.0
-                sel_anchor = st.number_input(
-                    "Anchor (breakdown level $)", value=default_anchor,
-                    step=0.5, format="%.2f", key="s_anchor"
-                )
-            with wl_col3:
-                sel_type = st.selectbox(
-                    "Setup type", list(SETUP_TYPES.keys()),
-                    index=2,   # FBD_WATCH default
-                    help="Upgrade to FBD_CONFIRMED once price reclaims the anchor",
-                    key="s_setup_type"
-                )
-
-            sel_notes = st.text_input(
-                "Notes (optional)",
-                placeholder="e.g. broke 200MA on heavy vol, watching $42 reclaim",
-                key="s_notes"
-            )
-
-            if st.button("➕  Add to Watchlist", key="s_add_btn"):
-                existing = {w["ticker"] for w in st.session_state.watchlist}
-                if sel_ticker in existing:
-                    st.warning(f"{sel_ticker} is already in the watchlist.")
-                else:
-                    row = match_row.iloc[0] if not match_row.empty else {}
-                    st.session_state.watchlist.append({
-                        "ticker":       sel_ticker,
-                        "company":      row.get("company", "") if hasattr(row, "get") else "",
-                        "sector":       row.get("sector", "")  if hasattr(row, "get") else "",
-                        "anchor":       sel_anchor,
-                        "setup_type":   sel_type,
-                        "notes":        sel_notes,
-                        "added":        date.today().isoformat(),
-                        "price_at_add": row.get("price", 0.0) if hasattr(row, "get") else 0.0,
-                    })
-                    st.success(f"✅ {sel_ticker} added to watchlist.")
+            st.dataframe(disp, use_container_width=True, hide_index=True, column_config=col_cfg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 2 — OPTIONS ANALYSER
+#  TAB 2 — FAKE BREAKDOWN SCANNER
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_fbd:
+
+    st.subheader("Fake Breakdown Scanner — US Large/Mid-Cap")
+    st.caption(
+        "Finds US large/mid-cap stocks that broke BELOW a key level (52-week low, "
+        "26-week low, or key support) within the flush window and have since "
+        "**reclaimed back above** that level — the classic Failed Breakdown (FBD) setup. "
+        "Use the Options Analyser tab to size a call or LEAP on a candidate."
+    )
+
+    fbd_params = _scan_filter_ui("fbd")
+    fbd_run = st.button("🔍  Run Scan", type="primary", use_container_width=True, key="fbd_run")
+
+    if fbd_run:
+        prog = st.progress(0, text="Fetching US stock universe…")
+        try:
+            df_fbd = run_fbd_screener(**fbd_params, progress_cb=_make_progress_cb(prog))
+            st.session_state.fbd_scan_results = df_fbd
+            st.session_state.fbd_scan_params  = fbd_params
+            st.session_state.fbd_scan_time    = datetime.now()
+        except Exception as e:
+            st.error(f"Scan failed: {e}")
+            df_fbd = pd.DataFrame()
+        prog.empty()
+
+    df_fbd = st.session_state.fbd_scan_results
+
+    if df_fbd is not None:
+        if st.session_state.fbd_scan_time:
+            st.caption(
+                f"Last scanned: {st.session_state.fbd_scan_time.strftime('%H:%M:%S')} — re-run to refresh"
+            )
+        if df_fbd.empty:
+            st.info(
+                "No FBD setups found today. "
+                "Try widening the Flush window, reducing Min ATR%, "
+                "lowering the Min relative volume, or reducing Min options OI."
+            )
+        else:
+            st.success(f"**{len(df_fbd)} FBD setups** passed all filters.")
+            disp = df_fbd.rename(columns={
+                "ticker":    "Ticker",
+                "company":   "Company",
+                "sector":    "Sector",
+                "price":     "Price",
+                "breakdown": "Signal",
+                "bd_level":  "BD Level",
+                "pct_above": "% Above",
+                "rel_vol":   "Rel Vol",
+                "atr_pct":   "ATR%",
+                "rsi":       "RSI",
+                "options_oi":"Options OI",
+                "earnings":  "Earnings",
+            })
+            col_cfg = dict(_SCAN_COL_CONFIG)
+            col_cfg["% Above"] = st.column_config.NumberColumn(
+                format="%.1f%%", help="How far current price is above the reclaimed level"
+            )
+            st.dataframe(disp, use_container_width=True, hide_index=True, column_config=col_cfg)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 3 — OPTIONS ANALYSER
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_analyse:
 
     st.subheader("Options Analyser")
     st.caption(
-        "Enter any ticker and anchor price to get a call vs. debit spread "
+        "Enter any ticker and anchor price to get a swing call or LEAP "
         "recommendation sized to your max risk."
     )
 
     # ── inputs ────────────────────────────────────────────────────────────
-    wl_tickers = [w["ticker"] for w in st.session_state.watchlist]
-    wl_map     = {w["ticker"]: w for w in st.session_state.watchlist}
-
     ac1, ac2, ac3 = st.columns([2, 2, 3])
     with ac1:
-        default_t = wl_tickers[0] if wl_tickers else "ORCL"
-        a_ticker  = st.text_input("Ticker", value=default_t, key="a_ticker").upper().strip()
+        a_ticker = st.text_input("Ticker", value="", key="a_ticker").upper().strip()
     with ac2:
-        wl_entry      = wl_map.get(a_ticker)
-        default_anch  = float(wl_entry["anchor"]) if wl_entry else 0.0
-        a_anchor      = st.number_input(
-            "Anchor price ($)", value=default_anch,
-            step=0.5, format="%.2f", key="a_anchor",
+        a_anchor = st.number_input(
+            "Anchor price ($)", value=0.0, step=0.5, format="%.2f", key="a_anchor",
             help="The level that was broken (flush low). Leave 0 to use ATM."
         )
     with ac3:
         type_keys = list(SETUP_TYPES.keys())
-        default_ti = type_keys.index(wl_entry["setup_type"]) if wl_entry and wl_entry["setup_type"] in type_keys else 2
         a_setup = st.selectbox(
-            "Setup type", type_keys,
-            index=default_ti,
+            "Setup type", type_keys, index=2,
             format_func=lambda k: SETUP_LABELS[k],
             key="a_setup"
         )
@@ -325,23 +333,25 @@ with tab_analyse:
         with adv1:
             a_risk = st.number_input("Max risk ($)", value=MAX_RISK, step=100, key="a_risk")
         with adv2:
-            a_short_min = st.number_input("Short DTE min", value=7,  step=1, key="a_smin")
-            a_short_max = st.number_input("Short DTE max", value=35, step=1, key="a_smax")
+            a_swing_min = st.number_input("Swing DTE min", value=7,   step=1,  key="a_smin")
+            a_swing_max = st.number_input("Swing DTE max", value=35,  step=1,  key="a_smax")
         with adv3:
-            a_spread_dte = st.number_input("Spread DTE target", value=60, step=5, key="a_spdte")
+            a_leap_min  = st.number_input("LEAP DTE min",  value=180, step=30, key="a_lmin")
+            a_leap_max  = st.number_input("LEAP DTE max",  value=365, step=30, key="a_lmax")
 
     analyse_btn = st.button("⚡  Analyse", type="primary", use_container_width=True, key="a_btn")
 
     if analyse_btn and a_ticker:
         with st.spinner(f"Fetching options chain for {a_ticker}…"):
             result = _cached_analyse(
-                ticker            = a_ticker,
-                anchor            = a_anchor if a_anchor > 0 else None,
-                setup_type        = a_setup,
-                max_risk          = int(a_risk),
-                short_min_dte     = int(a_short_min),
-                short_max_dte     = int(a_short_max),
-                spread_dte_target = int(a_spread_dte),
+                ticker        = a_ticker,
+                anchor        = a_anchor if a_anchor > 0 else None,
+                setup_type    = a_setup,
+                max_risk      = int(a_risk),
+                swing_min_dte = int(a_swing_min),
+                swing_max_dte = int(a_swing_max),
+                leap_min_dte  = int(a_leap_min),
+                leap_max_dte  = int(a_leap_max),
             )
 
         if result["status"] == "error":
@@ -357,9 +367,9 @@ with tab_analyse:
         else:
             # ── price summary ─────────────────────────────────────────────
             pm1, pm2, pm3, pm4 = st.columns(4)
-            pm1.metric("Current Price",    f"${result['current_price']:.2f}")
-            pm2.metric("Anchor",           f"${result['anchor']:.2f}")
-            pm3.metric("5-day Low",        f"${result['lo_5d']:.2f}")
+            pm1.metric("Current Price",       f"${result['current_price']:.2f}")
+            pm2.metric("Anchor",              f"${result['anchor']:.2f}")
+            pm3.metric("5-day Low",           f"${result['lo_5d']:.2f}")
             if result["recovery_pct"] is not None:
                 pm4.metric("Recovery from anchor", f"{result['recovery_pct']:+.1f}%")
 
@@ -369,8 +379,13 @@ with tab_analyse:
             # ── recommendation ────────────────────────────────────────────
             rec = result.get("recommendation")
             if rec:
-                badge_color = "#00d395" if rec["type"] == "CALL" else "#58a6ff"
-                badge_label = "CALL" if rec["type"] == "CALL" else "SPREAD"
+                rec_type = rec["type"]
+                if rec_type == "CALL":
+                    badge_color, badge_label = "#00d395", "SWING CALL"
+                elif rec_type == "LEAP":
+                    badge_color, badge_label = "#f0a500", "LEAP CALL"
+                else:
+                    badge_color, badge_label = "#58a6ff", rec_type
                 st.markdown(
                     f"""<div class="rec-box">
                         <h3>⭐ Recommendation — <span style="color:{badge_color}">{badge_label}</span></h3>
@@ -386,206 +401,26 @@ with tab_analyse:
             else:
                 st.warning("No liquid options found matching the filter criteria.")
 
-            # ── calls table ───────────────────────────────────────────────
+            # ── swing calls table ─────────────────────────────────────────
             if not result["calls_df"].empty:
                 st.markdown("---")
-                st.subheader(f"Directional Calls  ({int(a_short_min)}–{int(a_short_max)} DTE)")
+                st.subheader(f"Swing Calls  ({int(a_swing_min)}–{int(a_swing_max)} DTE)")
                 st.caption("Sorted by score (best risk/reward first)")
-                st.dataframe(
-                    result["calls_df"],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(result["calls_df"], use_container_width=True, hide_index=True)
             else:
-                st.info(f"No liquid calls found in {int(a_short_min)}–{int(a_short_max)} DTE window.")
+                st.info(f"No liquid calls found in {int(a_swing_min)}–{int(a_swing_max)} DTE window.")
 
-            # ── spreads table ─────────────────────────────────────────────
-            if not result["spreads_df"].empty:
+            # ── LEAP calls table ──────────────────────────────────────────
+            if not result["leaps_df"].empty:
                 st.markdown("---")
-                st.subheader(f"Debit Spreads  (~{int(a_spread_dte)} DTE)")
-                st.caption("Sorted by R:R (best risk-reward first)")
-                st.dataframe(
-                    result["spreads_df"],
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.subheader(f"LEAP Calls  ({int(a_leap_min)}–{int(a_leap_max)} DTE)")
+                st.caption("Long-dated directional calls sorted by score")
+                st.dataframe(result["leaps_df"], use_container_width=True, hide_index=True)
             else:
-                st.info(f"No spread candidates near {int(a_spread_dte)} DTE.")
+                st.info(f"No LEAP calls found in {int(a_leap_min)}–{int(a_leap_max)} DTE window.")
 
             st.markdown("---")
-            st.caption("⚠️ Not financial advice. Verify all prices with your broker before trading. Greeks are Black-Scholes estimates from yfinance implied volatility.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  TAB 3 — WATCHLIST
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_watch:
-
-    st.subheader("📋 Watchlist")
-    st.caption(
-        "Share between sessions via the Export/Import buttons. "
-        "Dexter exports → sends CSV to Danny via WhatsApp/email → Danny imports. "
-        "Both see the same list."
-    )
-
-    # ── import / export row ───────────────────────────────────────────────
-    iex1, iex2, iex3 = st.columns([3, 3, 2])
-
-    with iex1:
-        uploaded = st.file_uploader(
-            "📥  Import watchlist CSV", type="csv",
-            help="Upload a CSV previously exported by you or Danny",
-            key="wl_upload"
-        )
-        if uploaded:
-            try:
-                imported_df  = pd.read_csv(uploaded)
-                existing_tks = {w["ticker"] for w in st.session_state.watchlist}
-                added = 0
-                for entry in imported_df.to_dict("records"):
-                    if str(entry.get("ticker", "")).upper() not in existing_tks:
-                        entry["ticker"] = str(entry["ticker"]).upper()
-                        st.session_state.watchlist.append(entry)
-                        existing_tks.add(entry["ticker"])
-                        added += 1
-                if added:
-                    st.success(f"Imported {added} new entr{'y' if added==1 else 'ies'}.")
-                else:
-                    st.info("All tickers already in watchlist — nothing new imported.")
-            except Exception as e:
-                st.error(f"Import failed: {e}")
-
-    with iex2:
-        if st.session_state.watchlist:
-            wl_df   = pd.DataFrame(st.session_state.watchlist)
-            csv_out = wl_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label    = "📤  Export watchlist CSV",
-                data     = csv_out,
-                file_name= f"fbd_watchlist_{date.today().isoformat()}.csv",
-                mime     = "text/csv",
-                help     = "Send this file to Danny (or import on another device)",
-                key      = "wl_export_btn",
+            st.caption(
+                "⚠️ Not financial advice. Verify all prices with your broker before trading. "
+                "Greeks are Black-Scholes estimates from yfinance implied volatility."
             )
-
-    with iex3:
-        if st.session_state.watchlist and st.button("🔄  Refresh prices", key="wl_refresh"):
-            st.rerun()
-
-    # ── manual add ────────────────────────────────────────────────────────
-    with st.expander("➕  Add ticker manually"):
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            m_ticker = st.text_input("Ticker", key="m_t").upper().strip()
-        with mc2:
-            m_anchor = st.number_input("Anchor ($)", value=0.0, step=0.5, format="%.2f", key="m_a")
-        with mc3:
-            m_setup = st.selectbox(
-                "Setup type", list(SETUP_TYPES.keys()),
-                format_func=lambda k: SETUP_LABELS[k],
-                key="m_st"
-            )
-        m_notes = st.text_input("Notes", key="m_n")
-
-        if st.button("Add", key="m_add"):
-            if not m_ticker:
-                st.warning("Enter a ticker.")
-            elif m_ticker in {w["ticker"] for w in st.session_state.watchlist}:
-                st.warning(f"{m_ticker} already in watchlist.")
-            else:
-                st.session_state.watchlist.append({
-                    "ticker":       m_ticker,
-                    "company":      "",
-                    "sector":       "",
-                    "anchor":       m_anchor,
-                    "setup_type":   m_setup,
-                    "notes":        m_notes,
-                    "added":        date.today().isoformat(),
-                    "price_at_add": 0.0,
-                })
-                st.success(f"✅ {m_ticker} added.")
-                st.rerun()
-
-    # ── watchlist table ───────────────────────────────────────────────────
-    st.markdown("---")
-
-    if not st.session_state.watchlist:
-        st.info("Watchlist is empty. Add tickers from the Screener tab or use the manual form above.")
-    else:
-        # fetch live prices for all tickers at once
-        all_tks = [w["ticker"] for w in st.session_state.watchlist]
-        live_px: dict = {}
-        try:
-            batch = yf.Tickers(" ".join(all_tks))
-            for t in all_tks:
-                try:
-                    live_px[t] = round(float(batch.tickers[t].fast_info.last_price), 2)
-                except Exception:
-                    live_px[t] = None
-        except Exception:
-            live_px = {t: None for t in all_tks}
-
-        rows = []
-        for i, w in enumerate(st.session_state.watchlist):
-            t      = w["ticker"]
-            lp     = live_px.get(t)
-            anchor = float(w.get("anchor", 0) or 0)
-            pct_vs = (
-                round((lp - anchor) / anchor * 100, 1)
-                if lp and anchor > 0 else None
-            )
-            # status emoji
-            if pct_vs is None:
-                status = "—"
-            elif pct_vs >= 3:
-                status = "✅ Above anchor"
-            elif pct_vs >= 0:
-                status = "🟡 Just reclaimed"
-            else:
-                status = "🔴 Below anchor"
-
-            rows.append({
-                "Ticker":       t,
-                "Company":      w.get("company", ""),
-                "Setup":        SETUP_LABELS.get(w.get("setup_type", ""), w.get("setup_type", "")),
-                "Anchor":       anchor if anchor > 0 else None,
-                "Current":      lp,
-                "% vs Anchor":  pct_vs,
-                "Status":       status,
-                "Added":        w.get("added", ""),
-                "Notes":        w.get("notes", ""),
-            })
-
-        wl_display = pd.DataFrame(rows)
-
-        st.dataframe(
-            wl_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Anchor":      st.column_config.NumberColumn(format="$%.2f"),
-                "Current":     st.column_config.NumberColumn(format="$%.2f"),
-                "% vs Anchor": st.column_config.NumberColumn(format="%.1f%%"),
-            },
-        )
-
-        # ── remove + analyse shortcuts ────────────────────────────────────
-        rm1, rm2, rm3 = st.columns([3, 2, 2])
-        with rm1:
-            rm_ticker = st.selectbox(
-                "Select ticker to remove",
-                [w["ticker"] for w in st.session_state.watchlist],
-                key="rm_sel"
-            )
-        with rm2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🗑  Remove", key="rm_btn"):
-                st.session_state.watchlist = [
-                    w for w in st.session_state.watchlist
-                    if w["ticker"] != rm_ticker
-                ]
-                st.rerun()
-        with rm3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.caption("Switch to Options Analyser tab to analyse any ticker in detail.")
