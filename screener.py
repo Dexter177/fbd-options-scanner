@@ -691,7 +691,7 @@ def run_fbd_screener(
     min_price:      float = 10.0,
     min_rel_vol:    float = 1.5,
     min_atr_pct:    float = 2.0,
-    flush_days:     int   = 7,
+    flush_days:     int   = 5,
     min_options_oi: int   = 100,
     progress_cb            = None,
 ) -> pd.DataFrame:
@@ -821,14 +821,15 @@ def run_fbd_screener(
             rsi_val = float(_calc_rsi(close).iloc[-1])
 
             candidates.append({
-                "ticker":    ticker,
-                "price":     round(current, 2),
-                "breakdown": btype,
-                "bd_level":  round(blevel, 2),
-                "pct_above": round(pct_above, 1),
-                "rel_vol":   round(rel_vol, 2),
-                "atr_pct":   round(atr_pct, 1),
-                "rsi":       round(rsi_val, 1) if not np.isnan(rsi_val) else None,
+                "ticker":          ticker,
+                "price":           round(current, 2),
+                "breakdown":       btype,
+                "bd_level":        round(blevel, 2),
+                "pct_above":       round(pct_above, 1),
+                "days_since_flush": flush_days - flush_offset,
+                "rel_vol":         round(rel_vol, 2),
+                "atr_pct":         round(atr_pct, 1),
+                "rsi":             round(rsi_val, 1) if not np.isnan(rsi_val) else None,
             })
 
         except Exception:
@@ -889,7 +890,7 @@ def run_fbd_screener(
 
     ordered = [
         "ticker", "company", "sector",
-        "price", "breakdown", "bd_level", "pct_above",
+        "price", "breakdown", "bd_level", "pct_above", "days_since_flush",
         "rel_vol", "atr_pct", "rsi", "options_oi", "earnings",
     ]
     df_out = df_out[[c for c in ordered if c in df_out.columns]]

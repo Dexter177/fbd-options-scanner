@@ -70,6 +70,7 @@ def _init_state():
         "fbd_scan_results": None,   # pd.DataFrame | None  (FBD scanner)
         "fbd_scan_params":  None,
         "fbd_scan_time":    None,
+        "fbd_prev_tickers": set(),  # tickers from previous FBD scan (for new-entry detection)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -97,13 +98,13 @@ tab_breakdown, tab_fbd, tab_analyse = st.tabs(
 #  SHARED HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _scan_filter_ui(key_prefix: str) -> dict:
+def _scan_filter_ui(key_prefix: str, flush_max: int = 21, flush_default: int = 7) -> dict:
     """Render filter controls; returns dict of scan params."""
     with st.expander("⚙️ Filter settings", expanded=True):
         fc1, fc2 = st.columns(2)
         with fc1:
             flush_days = st.slider(
-                "Flush window (days)", 1, 21, 7, step=1,
+                "Flush window (days)", 1, flush_max, flush_default, step=1,
                 key=f"{key_prefix}_flush",
                 help="Breakdown signal must have occurred within this many trading bars"
             )
@@ -146,15 +147,15 @@ def _make_progress_cb(prog_widget):
     def _cb(pct: float):
         pct = min(float(pct), 0.99)
         if pct < 0.06:
-            txt = "Fetching US stock universe (~1,500–2,000 stocks)..."
+            txt = "Fetching US stock universe (~1,500–2,000 stocks)…"
         elif pct < 0.36:
-            txt = "Downloading 1 year of daily price data..."
+            txt = "Downloading 1 year of daily price data…"
         elif pct < 0.87:
-            txt = f"Scanning breakdown signals... {int(pct * 100)}%"
+            txt = f"Scanning breakdown signals… {int(pct * 100)}%"
         elif pct < 0.98:
-            txt = "Checking options liquidity for candidates..."
+            txt = "Checking options liquidity for candidates…"
         else:
-            txt = "Finalising results..."
+            txt = "Finalising results…"
         prog_widget.progress(pct, text=txt)
     return _cb
 
@@ -187,7 +188,7 @@ with tab_breakdown:
     bd_run = st.button("🔍  Run Scan", type="primary", use_container_width=True, key="bd_run")
 
     if bd_run:
-        prog = st.progress(0, text="Fetching US stock universe...")
+        prog = st.progress(0, text="Fetching US stock universe…")
         try:
             df_bd = run_screener(**bd_params, progress_cb=_make_progress_cb(prog))
             st.session_state.scan_results = df_bd
@@ -248,13 +249,18 @@ with tab_fbd:
         "Use the Options Analyser tab to size a call or LEAP on a candidate."
     )
 
-    fbd_params = _scan_filter_ui("fbd")
+    fbd_params = _scan_filter_ui("fbd", flush_max=7, flush_default=5)
     fbd_run = st.button("🔍  Run Scan", type="primary", use_container_width=True, key="fbd_run")
 
     if fbd_run:
-        prog = st.progress(0, text="Fetching US stock universe...")
+        prog = st.progress(0, text="Fetching US stock universe…")
         try:
             df_fbd = run_fbd_screener(**fbd_params, progress_cb=_make_progress_cb(prog))
+            # Detect new entries vs previous scan
+            if not df_fbd.empty:
+                prev = st.session_state.fbd_prev_tickers
+                df_fbd["new"] = df_fbd["ticker"].apply(lambda t: t not in prev)
+                st.session_state.fbd_prev_tickers = set(df_fbd["ticker"].tolist())
             st.session_state.fbd_scan_results = df_fbd
             st.session_state.fbd_scan_params  = fbd_params
             st.session_state.fbd_scan_time    = datetime.now()
@@ -278,23 +284,31 @@ with tab_fbd:
             )
         else:
             st.success(f"**{len(df_fbd)} FBD setups** passed all filters.")
-            disp = df_fbd.rename(columns={
-                "ticker":    "Ticker",
-                "company":   "Company",
-                "sector":    "Sector",
-                "price":     "Price",
-                "breakdown": "Signal",
-                "bd_level":  "BD Level",
-                "pct_above": "% Above",
-                "rel_vol":   "Rel Vol",
-                "atr_pct":   "ATR%",
-                "rsi":       "RSI",
-                "options_oi":"Options OI",
-                "earnings":  "Earnings",
+            disp = df_fbd.copy()
+            if "new" in disp.columns:
+                disp["new"] = disp["new"].map({True: "🆕", False: ""})
+            disp = disp.rename(columns={
+                "ticker":          "Ticker",
+                "company":         "Company",
+                "sector":          "Sector",
+                "price":           "Price",
+                "breakdown":       "Signal",
+                "bd_level":        "BD Level",
+                "pct_above":       "% Above",
+                "days_since_flush":"Days Since Flush",
+                "rel_vol":         "Rel Vol",
+                "atr_pct":         "ATR%",
+                "rsi":             "RSI",
+                "options_oi":      "Options OI",
+                "earnings":        "Earnings",
+                "new":             "New",
             })
             col_cfg = dict(_SCAN_COL_CONFIG)
             col_cfg["% Above"] = st.column_config.NumberColumn(
                 format="%.1f%%", help="How far current price is above the reclaimed level"
+            )
+            col_cfg["Days Since Flush"] = st.column_config.NumberColumn(
+                format="%d days", help="Trading days since the flush/breakdown bar"
             )
             st.dataframe(disp, use_container_width=True, hide_index=True, column_config=col_cfg)
 
@@ -346,7 +360,7 @@ with tab_analyse:
     analyse_btn = st.button("⚡  Analyse", type="primary", use_container_width=True, key="a_btn")
 
     if analyse_btn and a_ticker:
-        with st.spinner(f"Fetching options chain for {a_ticker}..."):
+        with st.spinner(f"Fetching options chain for {a_ticker}…"):
             result = _cached_analyse(
                 ticker        = a_ticker,
                 anchor        = a_anchor if a_anchor > 0 else None,
