@@ -352,7 +352,7 @@ with tab_analyse:
             a_risk = st.number_input("Max risk ($)", value=MAX_RISK, step=100, key="a_risk")
         with adv2:
             a_swing_min = st.number_input("Swing DTE min", value=7,   step=1,  key="a_smin")
-            a_swing_max = st.number_input("Swing DTE max", value=35,  step=1,  key="a_smax")
+            a_swing_max = st.number_input("Swing DTE max", value=45,  step=1,  key="a_smax")
         with adv3:
             a_leap_min  = st.number_input("LEAP DTE min",  value=180, step=30, key="a_lmin")
             a_leap_max  = st.number_input("LEAP DTE max",  value=365, step=30, key="a_lmax")
