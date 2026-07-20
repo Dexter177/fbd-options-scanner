@@ -5,7 +5,7 @@ Refactored from fbd_stock_scanner.py to return DataFrames and dicts
 instead of printing. Used by app.py Streamlit UI.
 
 Key function: analyse_ticker()
-  Returns a dict with calls_df, straddles_df, leaps_df, and recommendation.
+  Returns a dict with calls_df, spreads_df, and recommendation.
 """
 
 import math
@@ -45,9 +45,9 @@ except ImportError as exc:
     ) from exc
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 #  CONFIG
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 MAX_RISK   = 1_000   # USD, default hard cap per trade
 RISK_FREE  = 0.045   # ~4.5% risk-free rate
@@ -61,47 +61,47 @@ MAX_DELTA  = 0.70
 
 # (prefer_call, rationale string)
 SETUP_TYPES = {
-    "FBD_CONFIRMED": (True,  "Short-dated call - momentum is confirmed, strike while it's hot"),
-    "FBD_ZONE":      (False, "Spread - flush zone not fully resolved, give it room"),
-    "FBD_WATCH":     (False, "Spread - not triggered yet, wait for the flush then buy the recovery"),
-    "SUPPORT_TEST":  (False, "Spread - support not reconfirmed, cap downside"),
-    "LONGER_TERM":   (False, "Spread - wider DTE, directional thesis not time-sensitive"),
-    "KNIFE_CATCH":   (False, "Spread - starter size only, oversold but not confirmed"),
+    "FBD_CONFIRMED": (True,  "Short-dated call — momentum is confirmed, strike while it's hot"),
+    "FBD_ZONE":      (False, "Spread — flush zone not fully resolved, give it room"),
+    "FBD_WATCH":     (False, "Spread — not triggered yet, wait for the flush then buy the recovery"),
+    "SUPPORT_TEST":  (False, "Spread — support not reconfirmed, cap downside"),
+    "LONGER_TERM":   (False, "Spread — wider DTE, directional thesis not time-sensitive"),
+    "KNIFE_CATCH":   (False, "Spread — starter size only, oversold but not confirmed"),
 }
 
 SETUP_LABELS = {
-    "FBD_CONFIRMED": "FBD Confirmed",
-    "FBD_ZONE":      "FBD Zone",
-    "FBD_WATCH":     "FBD Watch",
-    "SUPPORT_TEST":  "Support Retest",
-    "LONGER_TERM":   "Longer Term",
-    "KNIFE_CATCH":   "Knife Catch",
+    "FBD_CONFIRMED": "✅ FBD Confirmed",
+    "FBD_ZONE":      "🟡 FBD Zone",
+    "FBD_WATCH":     "👁 FBD Watch",
+    "SUPPORT_TEST":  "🔁 Support Retest",
+    "LONGER_TERM":   "📈 Longer Term",
+    "KNIFE_CATCH":   "⚠️ Knife Catch",
 }
 
 SETUP_WARNINGS = {
-    "KNIFE_CATCH": "Not a confirmed FBD. Consider 25-50% of max budget. High risk.",
-    "FBD_WATCH":   "Enter only if the level is actually tapped. Don't chase.",
+    "KNIFE_CATCH": "⚠️ Not a confirmed FBD. Consider 25–50% of max budget. High risk.",
+    "FBD_WATCH":   "👁 Enter only if the level is actually tapped. Don't chase.",
 }
 
 SETUP_DESCRIPTIONS = {
     "FBD_CONFIRMED": (
-        "Stock has flushed below a key level AND has already reclaimed above it -- "
+        "Stock has flushed below a key level AND has already reclaimed above it — "
         "reversal confirmed. Highest-conviction FBD setup. Uses short-dated calls "
-        "(7-35 DTE) to capture near-term momentum while it's hot."
+        "(7–35 DTE) to capture near-term momentum while it's hot."
     ),
     "FBD_ZONE": (
         "Stock is flushing through or sitting at a key level but hasn't fully "
-        "recovered yet. The setup is still developing -- a spread structure reduces "
+        "recovered yet. The setup is still developing — a spread structure reduces "
         "premium risk and gives the trade room to resolve."
     ),
     "FBD_WATCH": (
-        "You have a level to watch for a potential flush. You're NOT in yet -- "
+        "You have a level to watch for a potential flush. You're NOT in yet — "
         "wait for price to actually tap the level before entering, then buy the "
         "recovery. Uses a spread as the vehicle once triggered."
     ),
     "SUPPORT_TEST": (
         "Stock is retesting a prior support level from above but hasn't broken "
-        "through it yet. Directional conviction is lower -- a spread caps max loss "
+        "through it yet. Directional conviction is lower — a spread caps max loss "
         "in case support fails."
     ),
     "LONGER_TERM": (
@@ -111,15 +111,15 @@ SETUP_DESCRIPTIONS = {
     ),
     "KNIFE_CATCH": (
         "Stock is deeply oversold but there is NO confirmed FBD setup. Speculative "
-        "starter position only -- size down to 25-50% of your normal max risk. "
+        "starter position only — size down to 25–50% of your normal max risk. "
         "High risk of continued downside if the flush isn't finished."
     ),
 }
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 #  BLACK-SCHOLES
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 def bs_greeks(S: float, K: float, T: float, r: float, iv: float) -> Optional[dict]:
     """Call greeks via Black-Scholes. Returns dict or None on failure."""
@@ -145,7 +145,7 @@ def bs_greeks(S: float, K: float, T: float, r: float, iv: float) -> Optional[dic
 
 def _score_call(delta: float, theta: float, mid: float,
                 volume: int, oi: int) -> float:
-    """Score a call option 0-10. Higher = better risk/reward profile."""
+    """Score a call option 0–10. Higher = better risk/reward profile."""
     if mid <= 0:
         return 0.0
     ds = max(0, 1 - abs(delta - 0.42) / 0.25) * 3   # sweet spot ~0.42 delta
@@ -155,9 +155,9 @@ def _score_call(delta: float, theta: float, mid: float,
     return round(ds + ts + vs + os, 2)
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 #  CORE ANALYSIS
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 def analyse_ticker(
     ticker:        str,
@@ -185,7 +185,7 @@ def analyse_ticker(
     swing_min_dte / swing_max_dte : int
         DTE range for swing directional call search.
     leap_min_dte / leap_max_dte : int
-        DTE range for long-dated LEAP call search (default 180-365).
+        DTE range for long-dated LEAP call search (default 180–365).
 
     Returns
     -------
@@ -199,7 +199,6 @@ def analyse_ticker(
       recovery_pct    float | None
       fbd_status      str
       calls_df        pd.DataFrame (empty if none found)
-      straddles_df    pd.DataFrame (empty if none found)
       leaps_df        pd.DataFrame (empty if none found)
       recommendation  dict | None
         .type         "CALL" | "LEAP"
@@ -226,7 +225,7 @@ def analyse_ticker(
         "anchor":        anchor,
         "lo_5d":         None,
         "recovery_pct":  None,
-        "fbd_status":    "-",
+        "fbd_status":    "—",
         "calls_df":      pd.DataFrame(),
         "straddles_df":  pd.DataFrame(),
         "leaps_df":      pd.DataFrame(),
@@ -236,7 +235,7 @@ def analyse_ticker(
     }
 
     try:
-        # -- price -----------------------------------------------------------
+        # ── price ─────────────────────────────────────────────────────────
         tk   = yf.Ticker(ticker)
         hist = tk.history(period="10d", interval="1d")
         if hist.empty:
@@ -260,18 +259,18 @@ def analyse_ticker(
             rec_pct = round((current - anch) / anch * 100, 1)
             out["recovery_pct"] = rec_pct
             if current < anch:
-                out["fbd_status"] = f"Still below level (${anch:.2f}) -- not yet recovered"
+                out["fbd_status"] = f"⚠️ Still below level (${anch:.2f}) — not yet recovered"
             elif lo_5d > anch:
-                out["fbd_status"] = f"5-day low (${lo_5d:.2f}) never touched level -- not a flush"
+                out["fbd_status"] = f"⚠️ 5-day low (${lo_5d:.2f}) never touched level — not a flush"
             else:
                 out["fbd_status"] = (
-                    f"Flushed below ${anch:.2f}, now {rec_pct:+.1f}% above -- "
+                    f"✅ Flushed below ${anch:.2f}, now {rec_pct:+.1f}% above — "
                     f"{'confirmed FBD' if rec_pct > 2 else 'early recovery'}"
                 )
         else:
             out["fbd_status"] = "ATM reference (no level set)"
 
-        # -- options expiries ------------------------------------------------
+        # ── options expiries ──────────────────────────────────────────────
         try:
             exps = _yf_retry(lambda: tk.options)
         except Exception as e:
@@ -297,7 +296,7 @@ def analyse_ticker(
         leap_exps  = [(e, _dte(e)) for e in exps
                       if leap_min_dte <= _dte(e) <= leap_max_dte]
 
-        # -- section 1: swing directional calls ------------------------------
+        # ── section 1: swing directional calls ────────────────────────────
         call_rows = []
         for exp_str, dte in swing_exps:
             T = dte / 365
@@ -322,8 +321,8 @@ def analyse_ticker(
                 oi  = int(_o) if (_o == _o and _o) else 0
                 mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
 
-                if mid < 0.01 or iv <= 0:                              continue
-                if vol < MIN_VOLUME or oi < MIN_OI:                    continue
+                if mid < 0.01 or iv <= 0:                         continue
+                if vol < MIN_VOLUME or oi < MIN_OI:                continue
                 if bid > 0 and ask > 0 and (ask - bid)/mid > MAX_BA_PCT: continue
 
                 g = bs_greeks(current, k, T, RISK_FREE, iv)
@@ -347,6 +346,7 @@ def analyse_ticker(
                     "Contracts": max_c,
                     "Outlay":    f"${outlay:.0f}",
                     "Score":     sc,
+                    # private — used for recommendation, dropped from display
                     "_score": sc, "_ask": ask, "_exp": exp_str,
                     "_dte": dte, "_k": k, "_delta": g["delta"],
                     "_theta": g["theta"], "_iv": iv, "_be": be,
@@ -361,7 +361,7 @@ def analyse_ticker(
                     .head(8).reset_index(drop=True)
             )
 
-        # -- section 2: swing straddles (buy call + put, same strike) --------
+        # ── section 2: swing straddles ────────────────────────────────────
         strad_rows = []
         for exp_str, dte in swing_exps:
             T = dte / 365
@@ -372,7 +372,7 @@ def analyse_ticker(
             except Exception:
                 continue
 
-            # Narrow to +/-10% of current price for straddle strikes
+            # Narrow to ±10% of current price for straddle strikes
             c_near = (
                 calls_c[
                     (calls_c.strike >= current * 0.90) &
@@ -438,12 +438,13 @@ def analyse_ticker(
                     "Call Ask":    f"${c_ask:.2f}",
                     "Put Ask":     f"${p_ask:.2f}",
                     "Total":       f"${total_ask:.2f}",
-                    "B/E Up":      f"${be_up:.2f}",
-                    "B/E Down":    f"${be_down:.2f}",
+                    "B/E ↑":       f"${be_up:.2f}",
+                    "B/E ↓":       f"${be_down:.2f}",
                     "Move Needed": f"{move_pct:.1f}%",
                     "Avg IV":      f"{avg_iv:.0f}%",
                     "Contracts":   max_c,
                     "Outlay":      f"${outlay:.0f}",
+                    # private — for sorting only
                     "_k": k, "_total": total_ask, "_move": move_pct,
                     "_dist": abs(k - current),
                 })
@@ -455,7 +456,7 @@ def analyse_ticker(
                     .head(8).reset_index(drop=True)
             )
 
-        # -- section 3: LEAP directional calls --------------------------------
+        # ── section 3: LEAP directional calls ────────────────────────────
         leap_rows = []
         for exp_str, dte in leap_exps:
             T = dte / 365
@@ -480,8 +481,8 @@ def analyse_ticker(
                 oi  = int(_o) if (_o == _o and _o) else 0
                 mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
 
-                if mid < 0.01 or iv <= 0:                              continue
-                if vol < MIN_VOLUME or oi < MIN_OI:                    continue
+                if mid < 0.01 or iv <= 0:                         continue
+                if vol < MIN_VOLUME or oi < MIN_OI:                continue
                 if bid > 0 and ask > 0 and (ask - bid)/mid > MAX_BA_PCT: continue
 
                 g = bs_greeks(current, k, T, RISK_FREE, iv)
@@ -505,6 +506,7 @@ def analyse_ticker(
                     "Contracts": max_c,
                     "Outlay":    f"${outlay:.0f}",
                     "Score":     sc,
+                    # private
                     "_score": sc, "_ask": ask, "_exp": exp_str,
                     "_dte": dte, "_k": k, "_delta": g["delta"],
                     "_theta": g["theta"], "_iv": iv, "_be": be,
@@ -519,7 +521,7 @@ def analyse_ticker(
                     .head(8).reset_index(drop=True)
             )
 
-        # -- recommendation --------------------------------------------------
+        # ── recommendation ────────────────────────────────────────────────
         bc = out["_best_call"]
         bl = out["_best_leap"]
         warning = SETUP_WARNINGS.get(setup_type)
@@ -529,15 +531,15 @@ def analyse_ticker(
             outlay = round(min(max_c * bc["_ask"] * 100, max_risk), 0)
             out["recommendation"] = {
                 "type":      "CALL",
-                "primary":   f"BUY {max_c}x {bc['_exp']}  ${bc['_k']:.2f} Call",
+                "primary":   f"BUY {max_c}× {bc['_exp']}  ${bc['_k']:.2f} Call",
                 "detail":    (
-                    f"Pay ~${bc['_ask']:.2f}/contract  "
-                    f"Total outlay ${outlay:.0f}  "
+                    f"Pay ~${bc['_ask']:.2f}/contract  ·  "
+                    f"Total outlay ${outlay:.0f}  ·  "
                     f"Break-even ${bc['_be']:.2f}"
                 ),
                 "greeks":    (
-                    f"Delta {bc['_delta']:.2f}  "
-                    f"Theta -${abs(bc['_theta']):.3f}/day  "
+                    f"Delta {bc['_delta']:.2f}  ·  "
+                    f"Theta −${abs(bc['_theta']):.3f}/day  ·  "
                     f"IV {bc['_iv']*100:.0f}%"
                 ),
                 "outlay":    outlay,
@@ -545,8 +547,8 @@ def analyse_ticker(
                 "warning":   warning,
                 "alt": (
                     f"Alt LEAP: "
-                    f"{max(1, int(max_risk/(bl['_ask']*100)))}x "
-                    f"{bl['_exp']}  ${bl['_k']:.2f}C @ ${bl['_ask']:.2f}  "
+                    f"{max(1, int(max_risk/(bl['_ask']*100)))}× "
+                    f"{bl['_exp']}  ${bl['_k']:.2f}C @ ${bl['_ask']:.2f}  ·  "
                     f"Delta {bl['_delta']:.2f}"
                 ) if bl else None,
             }
@@ -556,15 +558,15 @@ def analyse_ticker(
             outlay = round(min(max_l * bl["_ask"] * 100, max_risk), 0)
             out["recommendation"] = {
                 "type":      "LEAP",
-                "primary":   f"BUY {max_l}x {bl['_exp']}  ${bl['_k']:.2f} Call  [LEAP]",
+                "primary":   f"BUY {max_l}× {bl['_exp']}  ${bl['_k']:.2f} Call  [LEAP]",
                 "detail":    (
-                    f"Pay ~${bl['_ask']:.2f}/contract  "
-                    f"Total outlay ${outlay:.0f}  "
+                    f"Pay ~${bl['_ask']:.2f}/contract  ·  "
+                    f"Total outlay ${outlay:.0f}  ·  "
                     f"Break-even ${bl['_be']:.2f}"
                 ),
                 "greeks":    (
-                    f"Delta {bl['_delta']:.2f}  "
-                    f"Theta -${abs(bl['_theta']):.3f}/day  "
+                    f"Delta {bl['_delta']:.2f}  ·  "
+                    f"Theta −${abs(bl['_theta']):.3f}/day  ·  "
                     f"IV {bl['_iv']*100:.0f}%"
                 ),
                 "outlay":    outlay,
@@ -572,8 +574,8 @@ def analyse_ticker(
                 "warning":   warning,
                 "alt": (
                     f"Alt swing call: "
-                    f"{max(1, int(max_risk/(bc['_ask']*100)))}x "
-                    f"{bc['_exp']}  ${bc['_k']:.2f}C @ ${bc['_ask']:.2f}  "
+                    f"{max(1, int(max_risk/(bc['_ask']*100)))}× "
+                    f"{bc['_exp']}  ${bc['_k']:.2f}C @ ${bc['_ask']:.2f}  ·  "
                     f"Delta {bc['_delta']:.2f}"
                 ) if bc else None,
             }
@@ -583,10 +585,10 @@ def analyse_ticker(
             outlay = round(min(max_c * bc["_ask"] * 100, max_risk), 0)
             out["recommendation"] = {
                 "type":      "CALL",
-                "primary":   f"BUY {max_c}x {bc['_exp']}  ${bc['_k']:.2f} Call  [no LEAP found]",
+                "primary":   f"BUY {max_c}× {bc['_exp']}  ${bc['_k']:.2f} Call  [no LEAP found]",
                 "detail":    (
-                    f"Pay ~${bc['_ask']:.2f}  "
-                    f"Total ${outlay:.0f}  "
+                    f"Pay ~${bc['_ask']:.2f}  ·  "
+                    f"Total ${outlay:.0f}  ·  "
                     f"B/E ${bc['_be']:.2f}"
                 ),
                 "greeks":    f"Delta {bc['_delta']:.2f}",

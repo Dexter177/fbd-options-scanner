@@ -32,6 +32,7 @@ Universe sources (with automatic fallback):
 """
 
 import io
+import time as _time
 import warnings
 import numpy as np
 import pandas as pd
@@ -98,6 +99,39 @@ def _too_recent_ipo(yr_val) -> bool:
     now = datetime.now()
     # Any IPO in the current calendar year could still be < 6 months old
     return yr >= now.year
+
+
+def _yf_download_reliable(tickers: list, **kw) -> pd.DataFrame:
+    """
+    Wrap yf.download() with up to 2 retries.
+
+    Large parallel batch downloads on shared cloud infrastructure are frequently
+    rate-limited by Yahoo Finance: the request succeeds (no exception) but
+    returns empty / all-NaN data for most tickers.  We detect this by counting
+    how many tickers actually came back with at least one Close price.  If fewer
+    than 5% of the universe has data, we pause 3 s and retry.
+    """
+    min_ok = max(10, len(tickers) // 20)   # need ≥ 5 % of universe
+
+    for attempt in range(3):
+        raw = yf.download(tickers, **kw)
+
+        # Detect how many tickers returned usable data
+        if isinstance(raw.columns, pd.MultiIndex) and "Close" in raw.columns.get_level_values(1):
+            close_df = raw.xs("Close", axis=1, level=1)
+            n_ok = int(close_df.notna().any().sum())
+        elif not raw.empty:
+            n_ok = min_ok   # single-ticker or already-filtered result — accept
+        else:
+            n_ok = 0
+
+        if n_ok >= min_ok:
+            return raw
+
+        if attempt < 2:
+            _time.sleep(3)   # brief pause before retry
+
+    return raw   # return whatever we got on the third attempt
 
 
 def get_us_tickers() -> pd.DataFrame:
@@ -505,7 +539,7 @@ def run_screener(
         progress_cb(0.06)
 
     # ── 2. Batch-download 1 year of daily OHLCV ──────────────────────────────
-    raw = yf.download(
+    raw = _yf_download_reliable(
         tickers,
         period      = "1y",
         interval    = "1d",
@@ -727,7 +761,7 @@ def run_fbd_screener(
         progress_cb(0.06)
 
     # ── 2. Batch-download 1 year of daily OHLCV ──────────────────────────────
-    raw = yf.download(
+    raw = _yf_download_reliable(
         tickers,
         period      = "1y",
         interval    = "1d",
