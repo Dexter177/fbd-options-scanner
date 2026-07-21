@@ -71,8 +71,8 @@ SETUP_TYPES = {
 
 SETUP_LABELS = {
     "FBD_CONFIRMED": "✅ FBD Confirmed",
-    "FBD_ZONE":      "🟡 FBD Zone",
-    "FBD_WATCH":     "👁 FBD Watch",
+    "FBD_ZONE":      "🟡 FBD Flush",
+    "FBD_WATCH":     "👁 FBD Pre-Flush",
     "SUPPORT_TEST":  "🔁 Support Retest",
     "LONGER_TERM":   "📈 Longer Term",
     "KNIFE_CATCH":   "⚠️ Knife Catch",
