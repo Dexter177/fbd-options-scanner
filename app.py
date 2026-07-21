@@ -15,7 +15,7 @@ from datetime import date, datetime
 import streamlit as st
 import pandas as pd
 
-from screener     import run_screener, run_fbd_screener
+from screener     import run_screener, run_fbd_screener, YFinanceRateLimitError
 from scanner_core import analyse_ticker, SETUP_TYPES, SETUP_LABELS, SETUP_DESCRIPTIONS, MAX_RISK
 
 
@@ -194,6 +194,13 @@ with tab_breakdown:
             st.session_state.scan_results = df_bd
             st.session_state.scan_params  = bd_params
             st.session_state.scan_time    = datetime.now()
+        except YFinanceRateLimitError:
+            st.warning(
+                "⚠️ **Yahoo Finance rate limit** — data fetch returned empty after 3 attempts. "
+                "This happens on shared cloud IPs during peak hours. "
+                "Wait a few minutes and try again."
+            )
+            df_bd = pd.DataFrame()
         except Exception as e:
             st.error(f"Scan failed: {e}")
             df_bd = pd.DataFrame()
@@ -264,6 +271,13 @@ with tab_fbd:
             st.session_state.fbd_scan_results = df_fbd
             st.session_state.fbd_scan_params  = fbd_params
             st.session_state.fbd_scan_time    = datetime.now()
+        except YFinanceRateLimitError:
+            st.warning(
+                "⚠️ **Yahoo Finance rate limit** — data fetch returned empty after 3 attempts. "
+                "This happens on shared cloud IPs during peak hours. "
+                "Wait a few minutes and try again."
+            )
+            df_fbd = pd.DataFrame()
         except Exception as e:
             st.error(f"Scan failed: {e}")
             df_fbd = pd.DataFrame()

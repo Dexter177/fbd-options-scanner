@@ -47,6 +47,16 @@ except ImportError:
     raise ImportError("Run: pip install yfinance")
 
 
+class YFinanceRateLimitError(RuntimeError):
+    """Raised when yfinance returns insufficient data after all retries.
+
+    Yahoo Finance silently returns empty/NaN data (no exception) when it
+    rate-limits a request from a shared cloud IP.  Callers should show a
+    specific "try again in a few minutes" message rather than an empty-results
+    message when this is raised.
+    """
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +141,11 @@ def _yf_download_reliable(tickers: list, **kw) -> pd.DataFrame:
         if attempt < 2:
             _time.sleep(3)   # brief pause before retry
 
-    return raw   # return whatever we got on the third attempt
+    raise YFinanceRateLimitError(
+        f"Yahoo Finance returned usable data for only {n_ok:,} of {len(tickers):,} tickers "
+        f"after 3 attempts. This is a rate-limit on the shared cloud IP — "
+        f"wait a few minutes and try again."
+    )
 
 
 def get_us_tickers() -> pd.DataFrame:
