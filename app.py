@@ -418,7 +418,7 @@ with tab_analyse:
                     badge_color, badge_label = "#f0a500", "LEAP CALL"
                 else:
                     badge_color, badge_label = "#58a6ff", rec_type
-                st.markdown(
+                st.html(
                     f"""<div class="rec-box">
                         <h3>⭐ Recommendation — <span style="color:{badge_color}">{badge_label}</span></h3>
                         <div class="rec-detail" style="color:#8b949e">{rec['rationale']}</div>
@@ -427,8 +427,7 @@ with tab_analyse:
                         <div class="rec-greeks">{rec['greeks']}</div>
                         {"<div class='rec-alt'>Alternative: " + rec['alt'] + "</div>" if rec.get('alt') else ""}
                         {"<div class='rec-warning'>" + rec['warning'] + "</div>" if rec.get('warning') else ""}
-                    </div>""",
-                    unsafe_allow_html=True,
+                    </div>"""
                 )
             else:
                 st.warning("No liquid options found matching the filter criteria.")
